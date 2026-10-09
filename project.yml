@@ -1,0 +1,61 @@
+name: PortPilot
+options:
+  bundleIdPrefix: app.portpilot
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+  generateEmptyDirectories: true
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    SWIFT_STRICT_CONCURRENCY: minimal
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+    CODE_SIGN_IDENTITY: "-"
+    CODE_SIGN_STYLE: Manual
+    DEVELOPMENT_TEAM: ""
+    ENABLE_HARDENED_RUNTIME: NO
+    MARKETING_VERSION: "1.0.0"
+    CURRENT_PROJECT_VERSION: "1"
+targets:
+  PortPilot:
+    type: application
+    platform: macOS
+    sources:
+      - path: PortPilot
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.portpilot.PortPilot
+        PRODUCT_NAME: PortPilot
+        INFOPLIST_FILE: PortPilot/Resources/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        ENABLE_APP_SANDBOX: NO
+        COMBINE_HIDPI_IMAGES: YES
+        LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/../Frameworks"
+  PortPilotTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: PortPilotTests
+    dependencies:
+      - target: PortPilot
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.portpilot.PortPilotTests
+        GENERATE_INFOPLIST_FILE: YES
+        BUNDLE_LOADER: "$(TEST_HOST)"
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/PortPilot.app/Contents/MacOS/PortPilot"
+schemes:
+  PortPilot:
+    build:
+      targets:
+        PortPilot: all
+        PortPilotTests: [test]
+    test:
+      targets:
+        - PortPilotTests
+    run:
+      config: Debug
+    archive:
+      config: Release
