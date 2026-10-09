@@ -11,7 +11,7 @@
 
 <p align="center">
   <a href="https://github.com/Shayan5422/PortPilot/releases/latest"><img alt="Download for macOS" src="https://img.shields.io/badge/Download-macOS%2014%2B-0A84FF?logo=apple&logoColor=white"></a>
-  <a href="https://github.com/Shayan5422/PortPilot/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/Shayan5422/PortPilot?label=release&color=555"></a>
+  <a href="https://github.com/Shayan5422/PortPilot/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/Shayan5422/PortPilot?label=release&color=555&sort=semver"></a>
   <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-2ea44f"></a>
   <img alt="Universal: Apple Silicon and Intel" src="https://img.shields.io/badge/Apple%20Silicon%20%2B%20Intel-universal-555">
 </p>
@@ -317,32 +317,3 @@ If PortPilot saves you from a few `lsof -i` sessions, a ⭐️ on the repo is ap
 ## License
 
 [MIT](LICENSE) © 2026 Shayan Hashemi
-
----
-
-<div dir="rtl">
-
-## راهنمای سریع (فارسی)
-
-PortPilot یک برنامهٔ نوار منوی مک است. هر چند ثانیه پورت‌های باز را بررسی می‌کند، نشان می‌دهد هر پورت مال کدام پروژه یا پوشه است و چقدر CPU و رم مصرف می‌کند، و با یک کلیک آن را می‌بندد.
-
-**نصب**
-
-1. فایل DMG را از بخش [Releases](https://github.com/Shayan5422/PortPilot/releases/latest) دانلود کنید.
-2. بازش کنید و PortPilot را به پوشهٔ Applications بکشید.
-3. برنامه را باز کنید. با Developer ID امضا و توسط اپل notarize شده است، پس هشداری نمی‌بینید.
-4. آیکون PortPilot کنار Wi-Fi در نوار منو ظاهر می‌شود.
-
-برای ساختن از سورس: `brew install xcodegen` و بعد `./scripts/install.sh`
-
-**اجرای خودکار:** نصب‌کننده یک LaunchAgent می‌سازد. برنامه بعد از هر ورود به سیستم و هر ری‌استارت خودش اجرا می‌شود. اگر کرش کند دوباره باز می‌شود، ولی اگر خودتان Quit کنید تا ورود بعدی بسته می‌ماند. برای خاموش کردنش در تنظیمات برنامه گزینهٔ Launch at login را بردارید.
-
-**بستن پورت:** روی دکمهٔ ✕ کنار هر ردیف کلیک کنید. با ⌥ + کلیک، بستن اجباری انجام می‌شود (SIGKILL). فقط خودِ سرور و پروسه‌های زیرمجموعه‌اش بسته می‌شوند. ترمینال، ادیتور و Claude Code دست نمی‌خورند.
-
-**لغو اجرای خودکار:** بعضی سرویس‌ها با launchd، pm2 یا Docker دوباره بالا می‌آیند. برای آن‌ها از منوی «⋯» گزینهٔ **Stop & Disable Auto-Start** را بزنید، یا در بخش **Startup Items** آن مورد را غیرفعال کنید.
-
-**حریم خصوصی:** برنامه هیچ داده‌ای دربارهٔ شما ارسال نمی‌کند. تنها اتصال آن به اینترنت، بررسی روزانهٔ نسخهٔ جدید در GitHub است که می‌توانید در تنظیمات خاموشش کنید.
-
-**حذف برنامه:** در تنظیمات Launch at login را خاموش کنید، Quit بزنید و برنامه را از Applications به سطل زباله ببرید. اگر از سورس نصب کرده‌اید: `./scripts/uninstall.sh`
-
-</div>
