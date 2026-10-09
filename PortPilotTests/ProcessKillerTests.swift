@@ -21,7 +21,8 @@ final class ProcessKillerTests: XCTestCase {
             XCTAssertEqual(posix_spawn_file_actions_addopen(&fileActions, descriptor, "/dev/null",
                                                             descriptor == STDIN_FILENO ? O_RDONLY : O_WRONLY, 0), 0)
         }
-        let argv = ["/bin/sh", "-c", script].map { strdup($0) } + [nil]
+        let arguments: [String] = ["/bin/sh", "-c", script]
+        let argv: [UnsafeMutablePointer<CChar>?] = arguments.map { strdup($0) } + [nil]
         defer { argv.forEach { free($0) } }
         var pid: pid_t = 0
         let status = posix_spawn(&pid, "/bin/sh", &fileActions, &attributes, argv, environ)
