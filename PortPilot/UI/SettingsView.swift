@@ -4,6 +4,8 @@ import SwiftUI
 /// Every control binds straight to `store.settings`; AppStore persists and applies changes.
 struct SettingsView: View {
     @Bindable var store: AppStore
+    /// Opens the About page (the row at the bottom).
+    var onShowAbout: () -> Void = {}
     var onDone: () -> Void = {}
 
     private static let cpuChoices: [Double] = [25, 50, 80, 100, 150, 200]
@@ -22,9 +24,10 @@ struct SettingsView: View {
             }
 
             SettingsSection(title: "General") {
-                SettingsRow(title: "Launch at login",
-                            subtitle: "Starts at login and comes back if it ever crashes.") {
+                SettingsRow(title: "Launch at login", subtitle: SettingsText.launchAtLoginSubtitle(
+                    canManage: store.canManageLaunchAtLogin)) {
                     switchToggle("Launch at login", isOn: $store.settings.launchAtLogin)
+                        .disabled(!store.canManageLaunchAtLogin)
                 }
                 SettingsRow(title: "Refresh every") {
                     Picker("Refresh every", selection: $store.settings.refreshInterval) {
@@ -37,9 +40,11 @@ struct SettingsView: View {
                 SettingsRow(title: "Show port count in menu bar") {
                     switchToggle("Show port count in menu bar", isOn: $store.settings.showCountInMenuBar)
                 }
-                SettingsRow(title: "Notify when a new port opens", showsDivider: false) {
+                SettingsRow(title: "Notify when a new port opens") {
                     switchToggle("Notify when a new port opens", isOn: $store.settings.notifyOnNewPorts)
                 }
+                updatesRow
+                folderAccessRow
             }
 
             SettingsSection(title: "List") {
@@ -95,7 +100,7 @@ struct SettingsView: View {
                     }
                     .labelsHidden()
                     .controlSize(.small)
-                    Text("Stop sends SIGTERM so servers can shut down cleanly, then SIGKILL after this delay. ⌥-click Stop to kill immediately.")
+                    Text("Stop sends SIGTERM so servers can shut down cleanly, then SIGKILL after this delay. Apps and macOS services ask to confirm first and are never force-killed after it. ⌥-click Stop to kill immediately.")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -104,27 +109,87 @@ struct SettingsView: View {
                 .padding(.vertical, 10)
             }
 
-            about
+            aboutRow
         }
         .padding(.horizontal, 14)
         .padding(.top, 10)
         .padding(.bottom, 14)
+        // Only re-reads folders already asked about, so opening Settings never shows a macOS prompt.
+        .task { store.folderAccess.refresh() }
     }
 
-    private var about: some View {
-        HStack(spacing: 10) {
-            AppGlyph(size: 30)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(verbatim: "PortPilot \(Self.versionString)")
-                    .font(.system(size: 12, weight: .semibold))
-                Text("Built for Shayan")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
+    // MARK: Updates, folder access, About
+
+    private var updatesRow: some View {
+        let updates = store.updates
+        return SettingsRow(title: "Check for updates automatically",
+                           subtitle: updates.statusMessage ?? SettingsText.updatesSubtitle,
+                           subtitleStyle: updates.lastCheckFailed ? AnyShapeStyle(Color.orange) : AnyShapeStyle(.secondary),
+                           showsDivider: !store.folderAccess.denied.isEmpty) {
+            HStack(spacing: 8) {
+                if updates.isChecking {
+                    ProgressView()
+                        .controlSize(.mini)
+                        .accessibilityLabel("Checking for updates")
+                }
+                Button("Check Now") { updates.checkNow() }
+                    .controlSize(.small)
+                    .disabled(updates.isChecking)
+                    .help("Ask GitHub for the latest PortPilot release")
+                switchToggle("Check for updates automatically", isOn: $store.settings.checkForUpdates)
             }
-            Spacer()
         }
-        .padding(.horizontal, 4)
-        .padding(.top, 2)
+    }
+
+    @ViewBuilder
+    private var folderAccessRow: some View {
+        let denied = store.folderAccess.denied
+        if !denied.isEmpty {
+            SettingsRow(title: "Folder access",
+                        subtitle: SettingsText.folderAccessSubtitle(denied: denied),
+                        showsDivider: false) {
+                Button("Open Privacy Settings") { store.folderAccess.openPrivacySettings() }
+                    .controlSize(.small)
+                    .help("System Settings › Privacy & Security › Files & Folders")
+            }
+        }
+    }
+
+    /// Bottom row: app glyph, version, and the way into About.
+    private var aboutRow: some View {
+        Button(action: onShowAbout) {
+            HStack(spacing: 10) {
+                AppGlyph(size: 30)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("About PortPilot")
+                        .font(.system(size: 12.5, weight: .semibold))
+                    Text(AppInfo.versionLine())
+                        .font(.system(size: 11).monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 8)
+                if let update = store.updates.availableUpdate {
+                    Text(verbatim: "\(update.version) available")
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .foregroundStyle(Color.accentColor)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(Color.accentColor.opacity(0.14)))
+                }
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+                    .accessibilityHidden(true)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(HoverButtonStyle(cornerRadius: 10, padding: EdgeInsets()))
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Theme.cardFill))
+        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Theme.hairline, lineWidth: 0.5))
+        .help("Version, credits, links and updates")
+        .accessibilityLabel("About PortPilot, \(AppInfo.versionLine())")
     }
 
     // MARK: Helpers
@@ -144,7 +209,7 @@ struct SettingsView: View {
     private func switchToggle(_ title: String, isOn: Binding<Bool>) -> some View {
         Toggle(title, isOn: isOn)
             .labelsHidden()
-            .toggleStyle(.switch)
+            .toggleStyle(PanelSwitchStyle())
             .controlSize(.mini)
     }
 
@@ -152,21 +217,28 @@ struct SettingsView: View {
     private static func choices<T: Comparable>(_ presets: [T], current: T) -> [T] {
         presets.contains(current) ? presets : (presets + [current]).sorted()
     }
+}
 
-    static var versionString: String {
-        let info = Bundle.main.infoDictionary
-        let version = info?["CFBundleShortVersionString"] as? String ?? "1.0"
-        if let build = info?["CFBundleVersion"] as? String, !build.isEmpty, build != version {
-            return "\(version) (\(build))"
-        }
-        return version
+/// Settings copy that depends on state, kept pure for tests.
+enum SettingsText {
+    static let updatesSubtitle = "Asks GitHub once a day for the latest version. Nothing about you is sent."
+
+    static func launchAtLoginSubtitle(canManage: Bool) -> String {
+        canManage ? "Starts at login and comes back if it ever crashes."
+            : "Move PortPilot to Applications to start it at login"
+    }
+
+    /// "Downloads — Not allowed. Projects there show by folder name only."
+    static func folderAccessSubtitle(denied: [String]) -> String {
+        "\(FolderAccess.list(denied.map(FolderAccess.displayName))) — Not allowed. "
+            + "Projects there show by folder name only."
     }
 }
 
 // MARK: - Building blocks
 
 /// Grouped "card" like System Settings: uppercase caption above a rounded inset container.
-private struct SettingsSection<Content: View>: View {
+struct SettingsSection<Content: View>: View {
     let title: String
     @ViewBuilder var content: Content
 
@@ -188,9 +260,10 @@ private struct SettingsSection<Content: View>: View {
 }
 
 /// Title (+ optional explanation) on the left, a control on the right, hairline divider below.
-private struct SettingsRow<Control: View>: View {
+struct SettingsRow<Control: View>: View {
     let title: String
     var subtitle: String? = nil
+    var subtitleStyle = AnyShapeStyle(.secondary)
     var showsDivider = true
     @ViewBuilder var control: Control
 
@@ -203,7 +276,7 @@ private struct SettingsRow<Control: View>: View {
                     if let subtitle {
                         Text(subtitle)
                             .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(subtitleStyle)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }

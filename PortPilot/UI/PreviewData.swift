@@ -1,18 +1,28 @@
 import Foundation
 import SwiftUI
 
-/// Realistic sample data (modelled on a typical day on Shayan's Mac) for SwiftUI previews, snapshot checks
-/// and UI tests. Pure values — nothing here touches the system.
+/// Demo data: a believable afternoon on a fictional developer's Mac, for SwiftUI previews, demo snapshots
+/// (README screenshots) and UI checks. Pure values — nothing here touches the system.
+///
+/// Every path lives under the fictional `home`, never the real one, so a screenshot can't show the real user
+/// name; `store(...)` also makes the UI shorten that fictional home to "~" (`Format.setDisplayHome`).
+///
+/// The set covers each state the panel can show: a monorepo started by Claude Code with a `--reload` watcher,
+/// a launchd job that restarts on its own, a heavy process reachable from the network, Homebrew services,
+/// a startup item that keeps failing, and two recently stopped servers.
 enum PreviewData {
     static let uid: UInt32 = 501
-    static var home: String { NSHomeDirectory() }
+    /// Fictional home folder (not `NSHomeDirectory()`).
+    static let home = "/Users/alex"
+    /// Where the fictional developer keeps projects.
+    static let developer = home + "/Developer"
 
     // MARK: Snapshot
 
     static func snapshot(now: Date = Date()) -> ScanSnapshot {
         let groups = [
-            institutDeMai(now), claudeMonitor(now), idmPublicDeployment(now), cliquetteBackend(now), randomTool(now),
-            postgres(now), redis(now), cloudflared(now),
+            acmeShop(now), notesAPI(now), blog(now), mlPlayground(now),
+            postgres(now), redis(now), ollama(now), cloudflared(now),
             vsCode(now), spotify(now),
             rapportd(now),
         ]
@@ -30,38 +40,36 @@ enum PreviewData {
     static func startupItems() -> [StartupItem] {
         let agents = home + "/Library/LaunchAgents"
         return [
-            StartupItem(label: "com.shayan.claude-monitor", plistPath: agents + "/com.shayan.claude-monitor.plist",
-                        command: "/opt/homebrew/bin/node server.js",
-                        workingDirectory: home + "/Downloads/NODES/claude-monitor",
+            StartupItem(label: "com.example.notes-api", plistPath: agents + "/com.example.notes-api.plist",
+                        command: "/opt/homebrew/bin/node server.js", workingDirectory: developer + "/notes-api",
                         runAtLoad: true, keepAlive: true, isDisabled: false, isLoaded: true,
-                        pid: 1187, lastExitStatus: 0, ports: [4180]),
-            StartupItem(label: "com.shayan.idm-public-deployment",
-                        plistPath: agents + "/com.shayan.idm-public-deployment.plist",
-                        command: "/bin/bash scripts/serve-public.sh",
-                        workingDirectory: home + "/Downloads/NODES/idm-public-deployment",
-                        runAtLoad: true, keepAlive: true, isDisabled: false, isLoaded: true,
-                        pid: 1203, lastExitStatus: 0, ports: [4173, 8000]),
+                        pid: 1187, lastExitStatus: 0, ports: [4000]),
             StartupItem(label: "homebrew.mxcl.postgresql@16", plistPath: agents + "/homebrew.mxcl.postgresql@16.plist",
                         command: "/opt/homebrew/opt/postgresql@16/bin/postgres -D /opt/homebrew/var/postgresql@16",
                         workingDirectory: "/opt/homebrew", runAtLoad: true, keepAlive: true, isDisabled: false,
-                        isLoaded: true, pid: 712, lastExitStatus: 0, ports: [5433]),
+                        isLoaded: true, pid: 712, lastExitStatus: 0, ports: [5432]),
             StartupItem(label: "homebrew.mxcl.redis", plistPath: agents + "/homebrew.mxcl.redis.plist",
                         command: "/opt/homebrew/opt/redis/bin/redis-server /opt/homebrew/etc/redis.conf",
                         workingDirectory: "/opt/homebrew/var", runAtLoad: true, keepAlive: true, isDisabled: false,
                         isLoaded: true, pid: 715, lastExitStatus: 0, ports: [6379]),
-            StartupItem(label: "com.shayan.cliquette-sync", plistPath: agents + "/com.shayan.cliquette-sync.plist",
-                        command: "/usr/bin/python3 sync.py --every 15m",
-                        workingDirectory: home + "/Downloads/NODES/cliquette-backend",
+            // Its folder was deleted, so launchd retries it and it fails with exit 78 every time.
+            StartupItem(label: "com.example.invoice-worker", plistPath: agents + "/com.example.invoice-worker.plist",
+                        command: "/opt/homebrew/bin/node dist/worker.js",
+                        workingDirectory: developer + "/invoice-worker",
+                        runAtLoad: true, keepAlive: true, isDisabled: false, isLoaded: true,
+                        pid: nil, lastExitStatus: 78, ports: []),
+            StartupItem(label: "com.example.nightly-backup", plistPath: agents + "/com.example.nightly-backup.plist",
+                        command: "/usr/bin/python3 backup.py --keep 14",
+                        workingDirectory: developer + "/dotfiles/scripts",
                         runAtLoad: true, keepAlive: false, isDisabled: false, isLoaded: true,
-                        pid: nil, lastExitStatus: 1, ports: []),
+                        pid: nil, lastExitStatus: 0, ports: []),
             StartupItem(label: "com.google.keystone.agent", plistPath: agents + "/com.google.keystone.agent.plist",
                         command: home + "/Library/Google/GoogleSoftwareUpdate/GoogleSoftwareUpdate.bundle/Contents/Resources/"
                             + "GoogleSoftwareUpdateAgent.app/Contents/MacOS/GoogleSoftwareUpdateAgent -runMode ifneeded",
                         workingDirectory: nil, runAtLoad: true, keepAlive: false, isDisabled: false, isLoaded: true,
                         pid: nil, lastExitStatus: 0, ports: []),
-            StartupItem(label: "com.shayan.random-tool", plistPath: agents + "/com.shayan.random-tool.plist",
-                        command: home + "/.bun/bin/bun run start",
-                        workingDirectory: home + "/Downloads/NODES/random-tool",
+            StartupItem(label: "com.example.weather-bot", plistPath: agents + "/com.example.weather-bot.plist",
+                        command: home + "/.bun/bin/bun run start", workingDirectory: developer + "/weather-bot",
                         runAtLoad: true, keepAlive: true, isDisabled: true, isLoaded: false,
                         pid: nil, lastExitStatus: nil, ports: []),
         ]
@@ -69,135 +77,129 @@ enum PreviewData {
 
     static func recentlyStopped(now: Date = Date()) -> [StoppedRecord] {
         [
-            StoppedRecord(id: UUID(), date: now.addingTimeInterval(-4 * 60), title: "vite-playground",
-                          ports: [5174], cwd: home + "/Downloads/NODES/vite-playground",
-                          arguments: ["/opt/homebrew/bin/node", "node_modules/.bin/vite", "--port", "5174"],
+            // Titles follow AppStore's "<group> · <process>"; npm and pnpm are the launch roots that Relaunch reruns.
+            StoppedRecord(id: UUID(), date: now.addingTimeInterval(-4 * 60), title: "kanban · vite",
+                          ports: [5173], cwd: developer + "/kanban",
+                          arguments: ["npm", "run", "dev"],
                           environment: ["PATH": "/opt/homebrew/bin:/usr/bin:/bin"],
-                          executablePath: "/opt/homebrew/bin/node", manager: .none),
-            StoppedRecord(id: UUID(), date: now.addingTimeInterval(-38 * 60), title: "idm-worker",
-                          ports: [8020], cwd: home + "/Downloads/NODES/idm-public-deployment",
-                          arguments: ["/opt/homebrew/bin/python3", "-m", "worker", "--port", "8020"],
-                          environment: [:], executablePath: "/opt/homebrew/bin/python3",
-                          manager: .launchd(LaunchdJob(label: "com.shayan.idm-worker", domain: "gui/\(uid)",
-                                                       plistPath: nil, keepAlive: true, runAtLoad: true, pid: nil))),
+                          executablePath: nil, manager: .none),
+            StoppedRecord(id: UUID(), date: now.addingTimeInterval(-38 * 60), title: "wiki · next dev",
+                          ports: [3001], cwd: developer + "/wiki",
+                          arguments: ["pnpm", "dev", "--port", "3001"],
+                          environment: ["PATH": "/opt/homebrew/bin:/usr/bin:/bin"],
+                          executablePath: nil, manager: .none),
         ]
     }
 
+    /// The group worth expanding in a screenshot: two processes, a watcher and an AI-agent origin.
+    static var featuredGroupID: String { "project:" + developer + "/acme-shop" }
+
+    /// A preview store over the demo data. It also makes the UI show the fictional `home` as "~" for the rest of
+    /// the process (previews and demo snapshots only; the app itself never calls this).
     @MainActor
     static func store(settings: AppSettings = AppSettings(), banner: Banner? = nil, empty: Bool = false,
-                      now: Date = Date()) -> AppStore {
-        AppStore(previewSnapshot: empty ? emptySnapshot(now: now) : snapshot(now: now),
-                 startupItems: startupItems(),
-                 recentlyStopped: empty ? [] : recentlyStopped(now: now),
-                 settings: settings,
-                 banner: banner)
+                      now: Date = Date(), expandFeatured: Bool = false) -> AppStore {
+        Format.setDisplayHome(home)
+        let store = AppStore(previewSnapshot: empty ? emptySnapshot(now: now) : snapshot(now: now),
+                             startupItems: startupItems(),
+                             recentlyStopped: empty ? [] : recentlyStopped(now: now),
+                             settings: settings,
+                             banner: banner)
+        if expandFeatured && !empty { store.expandedGroupIDs = [featuredGroupID] }
+        return store
     }
 
     static let respawnBanner = Banner(
         style: .warning,
-        message: "claude-monitor came back — launchd restarts it automatically.",
-        action: .disableAutoStart(groupID: "project:" + NSHomeDirectory() + "/Downloads/NODES/claude-monitor"),
+        message: "notes-api came back — launchd restarts it automatically.",
+        action: .disableAutoStart(groupID: "project:" + developer + "/notes-api"),
         actionTitle: "Stop & Disable")
 
     // MARK: Projects
 
-    private static func institutDeMai(_ now: Date) -> ListenerGroup {
-        let root = home + "/Downloads/NODES/Institut de mai"
+    /// Monorepo with a Next.js frontend and a FastAPI backend (`uvicorn --reload`), both started by Claude Code.
+    private static func acmeShop(_ now: Date) -> ListenerGroup {
+        let root = developer + "/acme-shop"
         let origin = LaunchOrigin(kind: .claudeCode, name: "Claude Code")
         let frontend = process(
             pid: 48211, ppid: 48190, comm: "node", uptime: 2 * 3600 + 14 * 60, now: now,
             exe: "/opt/homebrew/bin/node",
-            argv: ["node", root + "/frontend/node_modules/.bin/vite", "--port", "5330", "--strictPort"],
-            cwd: root + "/frontend", ports: [(5330, "127.0.0.1")],
-            usage: (1.6, 168_000_000), tree: (2.1, 231_000_000), category: .project,
-            project: ProjectInfo(rootPath: root, name: "Institut de mai", subpath: "frontend",
+            argv: ["node", root + "/frontend/node_modules/.bin/next", "dev", "--port", "3000"],
+            cwd: root + "/frontend", ports: [(3000, "127.0.0.1"), (3000, "::1")],
+            usage: (2.4, 214_000_000), tree: (3.1, 296_000_000), category: .project,
+            project: ProjectInfo(rootPath: root, name: "acme-shop", subpath: "frontend",
                                  markers: [".git", "package.json"]),
-            displayName: "vite", frameworks: ["Vite"], origin: origin)
+            displayName: "next dev", frameworks: ["Next.js"], origin: origin)
         let backend = process(
             pid: 48236, ppid: 48229, comm: "Python", uptime: 2 * 3600 + 13 * 60, now: now,
             exe: root + "/backend/.venv/bin/python3.12",
-            argv: [root + "/backend/.venv/bin/python", "-m", "uvicorn", "app.main:app", "--reload", "--port", "8014"],
-            cwd: root + "/backend", ports: [(8014, "127.0.0.1")],
+            argv: [root + "/backend/.venv/bin/python", "-m", "uvicorn", "app.main:app", "--reload", "--port", "8000"],
+            cwd: root + "/backend", ports: [(8000, "127.0.0.1")],
             usage: (0.4, 88_000_000), tree: (0.7, 131_000_000), category: .project,
-            project: ProjectInfo(rootPath: root, name: "Institut de mai", subpath: "backend",
+            project: ProjectInfo(rootPath: root, name: "acme-shop", subpath: "backend",
                                  markers: [".git", "pyproject.toml"]),
             displayName: "uvicorn app.main:app", frameworks: ["uvicorn", "FastAPI"], origin: origin,
             manager: .watcher(name: "uvicorn --reload"))
-        return ListenerGroup(id: "project:" + root, category: .project, title: "Institut de mai", subtitle: nil,
-                             path: root, processes: [frontend, backend])
+        // `npm run dev` and the uvicorn reloader end with Stop too.
+        return ListenerGroup(id: "project:" + root, category: .project, title: "acme-shop",
+                             subtitle: "frontend, backend", path: root, processes: [frontend, backend],
+                             extraUsage: ResourceUsage(cpuPercent: 0.1, memoryBytes: 74_000_000))
     }
 
-    private static func claudeMonitor(_ now: Date) -> ListenerGroup {
-        let root = home + "/Downloads/NODES/claude-monitor"
-        let job = LaunchdJob(label: "com.shayan.claude-monitor", domain: "gui/\(uid)",
-                             plistPath: home + "/Library/LaunchAgents/com.shayan.claude-monitor.plist",
+    /// Small API kept alive by a user LaunchAgent: it comes back when stopped, until auto-start is disabled.
+    private static func notesAPI(_ now: Date) -> ListenerGroup {
+        let root = developer + "/notes-api"
+        let job = LaunchdJob(label: "com.example.notes-api", domain: "gui/\(uid)",
+                             plistPath: home + "/Library/LaunchAgents/com.example.notes-api.plist",
                              keepAlive: true, runAtLoad: true, pid: 1187)
         let server = process(
             pid: 1187, ppid: 1, comm: "node", uptime: 3 * 86400 + 5 * 3600, now: now,
             exe: "/opt/homebrew/bin/node", argv: ["/opt/homebrew/bin/node", "server.js"],
-            cwd: root, ports: [(4180, "127.0.0.1")],
+            cwd: root, ports: [(4000, "127.0.0.1")],
             usage: (0.3, 61_000_000), tree: (0.3, 61_000_000), category: .project,
-            project: ProjectInfo(rootPath: root, name: "claude-monitor", subpath: nil, markers: [".git", "package.json"]),
+            project: ProjectInfo(rootPath: root, name: "notes-api", subpath: nil, markers: [".git", "package.json"]),
             displayName: "node server.js", frameworks: ["Express"],
             origin: LaunchOrigin(kind: .launchd, name: "launchd"), manager: .launchd(job))
-        return ListenerGroup(id: "project:" + root, category: .project, title: "claude-monitor",
+        return ListenerGroup(id: "project:" + root, category: .project, title: "notes-api",
                              subtitle: "node server.js", path: root, processes: [server])
     }
 
-    private static func idmPublicDeployment(_ now: Date) -> ListenerGroup {
-        let root = home + "/Downloads/NODES/idm-public-deployment"
-        let job = LaunchdJob(label: "com.shayan.idm-public-deployment", domain: "gui/\(uid)",
-                             plistPath: home + "/Library/LaunchAgents/com.shayan.idm-public-deployment.plist",
-                             keepAlive: true, runAtLoad: true, pid: 1203)
-        let project = ProjectInfo(rootPath: root, name: "idm-public-deployment", subpath: nil,
-                                  markers: [".git", "requirements.txt"])
-        let nginx = process(
-            pid: 1251, ppid: 1203, comm: "nginx", uptime: 3 * 86400 + 5 * 3600, now: now,
-            exe: "/opt/homebrew/Cellar/nginx/1.27.2/bin/nginx",
-            argv: ["nginx: master process /opt/homebrew/opt/nginx/bin/nginx", "-c", root + "/deploy/nginx.conf"],
-            cwd: root, ports: [(4173, "*")],
-            usage: (0.0, 6_000_000), tree: (0.1, 14_000_000), category: .project, project: project,
-            displayName: "nginx", frameworks: ["nginx"],
-            origin: LaunchOrigin(kind: .launchd, name: "launchd"), manager: .launchd(job))
-        let api = process(
-            pid: 1244, ppid: 1203, comm: "Python", uptime: 3 * 86400 + 5 * 3600, now: now,
-            exe: root + "/.venv/bin/python3.12",
-            argv: [root + "/.venv/bin/python", "-m", "uvicorn", "server:app", "--host", "127.0.0.1", "--port", "8000"],
-            cwd: root, ports: [(8000, "127.0.0.1")],
-            usage: (0.5, 112_000_000), tree: (0.5, 112_000_000), category: .project, project: project,
-            displayName: "uvicorn server:app", frameworks: ["uvicorn"],
-            origin: LaunchOrigin(kind: .launchd, name: "launchd"), manager: .launchd(job))
-        return ListenerGroup(id: "project:" + root, category: .project, title: "idm-public-deployment",
-                             subtitle: nil, path: root, processes: [nginx, api])
-    }
-
-    private static func cliquetteBackend(_ now: Date) -> ListenerGroup {
-        let root = home + "/Downloads/NODES/cliquette-backend"
-        let app = process(
-            pid: 61022, ppid: 60998, comm: "Python", uptime: 47 * 60, now: now,
-            exe: "/opt/homebrew/Cellar/python@3.12/3.12.7/Frameworks/Python.framework/Versions/3.12/bin/python3.12",
-            argv: ["python", "app.py"], cwd: root, ports: [(8777, "*")],
-            usage: (96.4, 1_120_000_000), tree: (96.4, 1_120_000_000), category: .project,
-            project: ProjectInfo(rootPath: root, name: "cliquette-backend", subpath: nil,
-                                 markers: [".git", "requirements.txt"]),
-            displayName: "python app.py", frameworks: ["Flask"],
-            origin: LaunchOrigin(kind: .terminal, name: "Terminal"))
-        return ListenerGroup(id: "project:" + root, category: .project, title: "cliquette-backend",
-                             subtitle: "python app.py", path: root, processes: [app])
-    }
-
-    private static func randomTool(_ now: Date) -> ListenerGroup {
-        let root = home + "/Downloads/NODES/random-tool"
+    private static func blog(_ now: Date) -> ListenerGroup {
+        let root = developer + "/blog"
         let server = process(
-            pid: 70415, ppid: 70402, comm: "bun", uptime: 9 * 60, now: now,
-            exe: home + "/.bun/bin/bun", argv: ["bun", "run", "src/index.ts"],
-            cwd: root, ports: [(53012, "127.0.0.1")],
-            usage: (0.2, 42_000_000), tree: (0.2, 42_000_000), category: .project,
-            project: ProjectInfo(rootPath: root, name: "random-tool", subpath: nil, markers: ["package.json", "bun.lockb"]),
-            displayName: "bun src/index.ts", frameworks: ["Bun"],
-            origin: LaunchOrigin(kind: .claudeCode, name: "Claude Code"))
-        return ListenerGroup(id: "project:" + root, category: .project, title: "random-tool",
-                             subtitle: "bun src/index.ts", path: root, processes: [server])
+            pid: 52310, ppid: 52298, comm: "node", uptime: 41 * 60, now: now,
+            exe: "/opt/homebrew/bin/node", argv: ["node", root + "/node_modules/.bin/astro", "dev"],
+            cwd: root, ports: [(4321, "::1")],
+            usage: (0.6, 143_000_000), tree: (0.9, 176_000_000), category: .project,
+            project: ProjectInfo(rootPath: root, name: "blog", subpath: nil, markers: [".git", "package.json"]),
+            displayName: "astro dev", frameworks: ["Astro"],
+            origin: LaunchOrigin(kind: .terminal, name: "Terminal"))
+        return ListenerGroup(id: "project:" + root, category: .project, title: "blog",
+                             subtitle: "astro dev", path: root, processes: [server],
+                             extraUsage: ResourceUsage(cpuPercent: 0, memoryBytes: 38_000_000))
+    }
+
+    /// A Gradio demo busy on a model (heavy CPU and memory, open to the network) next to Jupyter.
+    private static func mlPlayground(_ now: Date) -> ListenerGroup {
+        let root = developer + "/ml-playground"
+        let project = ProjectInfo(rootPath: root, name: "ml-playground", subpath: nil,
+                                  markers: [".git", "pyproject.toml"])
+        let origin = LaunchOrigin(kind: .ide, name: "VS Code")
+        let python = root + "/.venv/bin/python3.12"
+        let gradio = process(
+            pid: 61540, ppid: 61498, comm: "Python", uptime: 18 * 60, now: now,
+            exe: python, argv: [root + "/.venv/bin/python", "app.py"],
+            cwd: root, ports: [(7860, "*")],
+            usage: (164.2, 2_140_000_000), tree: (164.2, 2_140_000_000), category: .project, project: project,
+            displayName: "python app.py", frameworks: ["Gradio"], origin: origin)
+        let jupyter = process(
+            pid: 61022, ppid: 60998, comm: "Python", uptime: 1 * 3600 + 52 * 60, now: now,
+            exe: python, argv: [root + "/.venv/bin/python", root + "/.venv/bin/jupyter-lab", "--no-browser"],
+            cwd: root, ports: [(8888, "127.0.0.1"), (8888, "::1")],
+            usage: (0.5, 118_000_000), tree: (0.8, 164_000_000), category: .project, project: project,
+            displayName: "jupyter-lab", frameworks: ["Jupyter"], origin: origin)
+        return ListenerGroup(id: "project:" + root, category: .project, title: "ml-playground",
+                             subtitle: "python app.py", path: root, processes: [gradio, jupyter])
     }
 
     // MARK: Services
@@ -208,14 +210,14 @@ enum PreviewData {
                              keepAlive: true, runAtLoad: true, pid: 712)
         let server = process(
             pid: 712, ppid: 1, comm: "postgres", uptime: 6 * 86400 + 2 * 3600, now: now,
-            exe: "/opt/homebrew/Cellar/postgresql@16/16.4/bin/postgres",
-            argv: ["/opt/homebrew/opt/postgresql@16/bin/postgres", "-D", "/opt/homebrew/var/postgresql@16", "-p", "5433"],
-            cwd: "/opt/homebrew/var/postgresql@16", ports: [(5433, "127.0.0.1"), (5433, "::1")],
+            exe: "/opt/homebrew/Cellar/postgresql@16/16.10/bin/postgres",
+            argv: ["/opt/homebrew/opt/postgresql@16/bin/postgres", "-D", "/opt/homebrew/var/postgresql@16"],
+            cwd: "/opt/homebrew/var/postgresql@16", ports: [(5432, "127.0.0.1"), (5432, "::1")],
             usage: (0.1, 24_000_000), tree: (0.3, 97_000_000), category: .service, project: nil,
             displayName: "postgres", frameworks: ["PostgreSQL"],
             origin: LaunchOrigin(kind: .launchd, name: "launchd"), manager: .launchd(job))
-        return ListenerGroup(id: "launchd:homebrew.mxcl.postgresql@16", category: .service, title: "postgres",
-                             subtitle: "postgresql@16", path: "/opt/homebrew/var/postgresql@16", processes: [server])
+        return ListenerGroup(id: "launchd:homebrew.mxcl.postgresql@16", category: .service, title: "postgresql@16",
+                             subtitle: "postgres", path: "/opt/homebrew/var/postgresql@16", processes: [server])
     }
 
     private static func redis(_ now: Date) -> ListenerGroup {
@@ -224,7 +226,7 @@ enum PreviewData {
                              keepAlive: true, runAtLoad: true, pid: 715)
         let server = process(
             pid: 715, ppid: 1, comm: "redis-server", uptime: 6 * 86400 + 2 * 3600, now: now,
-            exe: "/opt/homebrew/Cellar/redis/7.4.1/bin/redis-server",
+            exe: "/opt/homebrew/Cellar/redis/8.2.1/bin/redis-server",
             argv: ["/opt/homebrew/opt/redis/bin/redis-server", "127.0.0.1:6379"],
             cwd: "/opt/homebrew/var", ports: [(6379, "127.0.0.1"), (6379, "::1")],
             usage: (0.2, 9_400_000), tree: (0.2, 9_400_000), category: .service, project: nil,
@@ -234,17 +236,29 @@ enum PreviewData {
                              subtitle: "redis-server", path: "/opt/homebrew/var", processes: [server])
     }
 
+    private static func ollama(_ now: Date) -> ListenerGroup {
+        let server = process(
+            pid: 30882, ppid: 30851, comm: "ollama", uptime: 5 * 3600 + 32 * 60, now: now,
+            exe: "/opt/homebrew/Cellar/ollama/0.12.3/bin/ollama", argv: ["ollama", "serve"],
+            cwd: home, ports: [(11434, "127.0.0.1")],
+            usage: (0.2, 486_000_000), tree: (0.2, 486_000_000), category: .service, project: nil,
+            displayName: "ollama serve", frameworks: ["Ollama"],
+            origin: LaunchOrigin(kind: .terminal, name: "Terminal"))
+        return ListenerGroup(id: "pid:" + server.basic.identity.description, category: .service,
+                             title: "ollama serve", subtitle: nil, path: home, processes: [server])
+    }
+
     private static func cloudflared(_ now: Date) -> ListenerGroup {
         let server = process(
-            pid: 33410, ppid: 33377, comm: "cloudflared", uptime: 5 * 3600 + 32 * 60, now: now,
-            exe: "/opt/homebrew/Cellar/cloudflared/2024.10.1/bin/cloudflared",
-            argv: ["cloudflared", "tunnel", "--metrics", "127.0.0.1:20241", "run", "idm-public"],
-            cwd: home, ports: [(20241, "127.0.0.1"), (20242, "127.0.0.1")],
+            pid: 33410, ppid: 33377, comm: "cloudflared", uptime: 47 * 60, now: now,
+            exe: "/opt/homebrew/Cellar/cloudflared/2025.9.1/bin/cloudflared",
+            argv: ["cloudflared", "tunnel", "--metrics", "127.0.0.1:20241", "run", "acme-preview"],
+            cwd: "/", ports: [(20241, "127.0.0.1")],
             usage: (0.6, 31_000_000), tree: (0.6, 31_000_000), category: .service, project: nil,
             displayName: "cloudflared tunnel run", frameworks: ["cloudflared"],
             origin: LaunchOrigin(kind: .terminal, name: "Terminal"))
         return ListenerGroup(id: "pid:" + server.basic.identity.description, category: .service,
-                             title: "cloudflared", subtitle: "tunnel run idm-public", path: nil, processes: [server])
+                             title: "cloudflared", subtitle: "tunnel run acme-preview", path: nil, processes: [server])
     }
 
     // MARK: Apps & system
@@ -321,7 +335,7 @@ enum PreviewData {
 struct PanelView_Previews: PreviewProvider {
     static var previews: some View {
         Group {
-            PanelView(store: PreviewData.store(), snapshotMode: true)
+            PanelView(store: PreviewData.store(expandFeatured: true), snapshotMode: true)
                 .previewDisplayName("Panel")
             PanelView(store: PreviewData.store(banner: PreviewData.respawnBanner), snapshotMode: true)
                 .preferredColorScheme(.dark)

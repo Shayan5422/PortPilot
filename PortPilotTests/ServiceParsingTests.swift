@@ -11,10 +11,10 @@ final class LaunchctlParsingTests: XCTestCase {
     PID\tStatus\tLabel
     -\t0\tcom.apple.SafariHistoryServiceAgent
     1170\t0\tcom.apple.progressd
-    50706\t-15\tcom.alasuitebench.planning-backend
+    50706\t-15\tcom.contoso.billing-backend
     -\t78\tus.zoom.updater
     993\t0\tsh.brew.postgresql@16
-    57752\t0\tapplication.alasuite.Compte-rendu.15940426.15940432
+    57752\t0\tapplication.com.contoso.FieldNotes.15940426.15940432
     this is not a row
     abc\t0\tbroken.pid
 
@@ -23,11 +23,11 @@ final class LaunchctlParsingTests: XCTestCase {
     func testParseListSkipsHeaderAndMalformedRows() {
         let entries = LaunchdService.parseList(listOutput)
         XCTAssertEqual(entries.map(\.label), [
-            "com.apple.SafariHistoryServiceAgent", "com.apple.progressd", "com.alasuitebench.planning-backend",
-            "us.zoom.updater", "sh.brew.postgresql@16", "application.alasuite.Compte-rendu.15940426.15940432",
+            "com.apple.SafariHistoryServiceAgent", "com.apple.progressd", "com.contoso.billing-backend",
+            "us.zoom.updater", "sh.brew.postgresql@16", "application.com.contoso.FieldNotes.15940426.15940432",
         ])
         XCTAssertEqual(entries[0], LaunchctlListEntry(pid: nil, lastExitStatus: 0, label: "com.apple.SafariHistoryServiceAgent"))
-        XCTAssertEqual(entries[2], LaunchctlListEntry(pid: 50706, lastExitStatus: -15, label: "com.alasuitebench.planning-backend"))
+        XCTAssertEqual(entries[2], LaunchctlListEntry(pid: 50706, lastExitStatus: -15, label: "com.contoso.billing-backend"))
         XCTAssertEqual(entries[3].lastExitStatus, 78)
         XCTAssertNil(entries[3].pid)
     }
@@ -41,9 +41,9 @@ final class LaunchctlParsingTests: XCTestCase {
         let labels = LaunchdService.runningLabels(fromListOutput: listOutput)
         XCTAssertEqual(labels, [
             1170: "com.apple.progressd",
-            50706: "com.alasuitebench.planning-backend",
+            50706: "com.contoso.billing-backend",
             993: "sh.brew.postgresql@16",
-            57752: "application.alasuite.Compte-rendu.15940426.15940432",
+            57752: "application.com.contoso.FieldNotes.15940426.15940432",
         ])
     }
 
@@ -83,9 +83,9 @@ final class LaunchctlParsingTests: XCTestCase {
 
     func testParsePrintOutputTakesTopLevelPathOnly() {
         let output = """
-        gui/501/com.alasuitebench.planning-backend = {
+        gui/501/com.contoso.billing-backend = {
         \tactive count = 1
-        \tpath = /Users/me/Library/LaunchAgents/com.alasuitebench.planning-backend.plist
+        \tpath = /Users/me/Library/LaunchAgents/com.contoso.billing-backend.plist
         \ttype = LaunchAgent
         \tstate = running
 
@@ -111,7 +111,7 @@ final class LaunchctlParsingTests: XCTestCase {
         }
         """
         let info = LaunchdService.parsePrintOutput(output)
-        XCTAssertEqual(info.path, "/Users/me/Library/LaunchAgents/com.alasuitebench.planning-backend.plist")
+        XCTAssertEqual(info.path, "/Users/me/Library/LaunchAgents/com.contoso.billing-backend.plist")
         XCTAssertEqual(info.properties, ["keepalive", "runatload", "inferred program"])
     }
 
@@ -163,16 +163,16 @@ final class LaunchdPlistTests: XCTestCase {
 
     func testProgramArgumentsPlist() throws {
         let plist: [String: Any] = [
-            "Label": "com.claude.monitor",
-            "ProgramArguments": ["/opt/homebrew/bin/node", "/Users/me/claude check/server.js"],
-            "WorkingDirectory": "/Users/me/claude check",
+            "Label": "com.example.uptime-monitor",
+            "ProgramArguments": ["/opt/homebrew/bin/node", "/Users/me/uptime check/server.js"],
+            "WorkingDirectory": "/Users/me/uptime check",
             "RunAtLoad": true,
             "KeepAlive": true,
         ]
-        let info = try XCTUnwrap(LaunchdService.parsePlist(plist, path: dir + "/com.claude.monitor.plist"))
-        XCTAssertEqual(info.label, "com.claude.monitor")
-        XCTAssertEqual(info.command, "/opt/homebrew/bin/node \"/Users/me/claude check/server.js\"")
-        XCTAssertEqual(info.workingDirectory, "/Users/me/claude check")
+        let info = try XCTUnwrap(LaunchdService.parsePlist(plist, path: dir + "/com.example.uptime-monitor.plist"))
+        XCTAssertEqual(info.label, "com.example.uptime-monitor")
+        XCTAssertEqual(info.command, "/opt/homebrew/bin/node \"/Users/me/uptime check/server.js\"")
+        XCTAssertEqual(info.workingDirectory, "/Users/me/uptime check")
         XCTAssertTrue(info.runAtLoad)
         XCTAssertTrue(info.keepAlive)
         XCTAssertFalse(info.disabledInPlist)
@@ -187,11 +187,11 @@ final class LaunchdPlistTests: XCTestCase {
     }
 
     func testProgramOnly() throws {
-        let plist: [String: Any] = ["Label": "io.sideloadly.daemon",
-                                    "Program": "/Applications/Sideloadly.app/Contents/Resources/sideloadly-daemon",
+        let plist: [String: Any] = ["Label": "io.fabrikam.daemon",
+                                    "Program": "/Applications/Fabrikam.app/Contents/Resources/fabrikam-daemon",
                                     "KeepAlive": false, "RunAtLoad": true]
-        let info = try XCTUnwrap(LaunchdService.parsePlist(plist, path: dir + "/io.sideloadly.daemon.plist"))
-        XCTAssertEqual(info.command, "/Applications/Sideloadly.app/Contents/Resources/sideloadly-daemon")
+        let info = try XCTUnwrap(LaunchdService.parsePlist(plist, path: dir + "/io.fabrikam.daemon.plist"))
+        XCTAssertEqual(info.command, "/Applications/Fabrikam.app/Contents/Resources/fabrikam-daemon")
         XCTAssertFalse(info.keepAlive)
         XCTAssertTrue(info.runAtLoad)
     }
@@ -213,7 +213,8 @@ final class LaunchdPlistTests: XCTestCase {
         XCTAssertTrue(LaunchdService.loadsInGUISession(["Aqua", "Background", "LoginWindow", "StandardIO", "System"]))
         XCTAssertFalse(LaunchdService.loadsInGUISession("LoginWindow"))
         XCTAssertFalse(LaunchdService.loadsInGUISession(["Background"]))
-        let prelogin: [String: Any] = ["Label": "com.realvnc.rvncserver.prelogin", "ProgramArguments": ["/x/rvncagent", "service"],
+        let prelogin: [String: Any] = ["Label": "com.example.remote-desktop.prelogin",
+                                       "ProgramArguments": ["/x/remote-agent", "service"],
                                        "LimitLoadToSessionType": "LoginWindow", "RunAtLoad": true]
         XCTAssertFalse(try XCTUnwrap(LaunchdService.parsePlist(prelogin, path: "/Library/LaunchAgents/p.plist")).loadsInGUISession)
     }
@@ -258,7 +259,7 @@ final class LaunchdPlistTests: XCTestCase {
     }
 
     func testReadPlistRejectsMissingFile() {
-        XCTAssertNil(LaunchdService.readPlist(at: "/nonexistent/app.portpilot.test.plist"))
+        XCTAssertNil(LaunchdService.readPlist(at: "/nonexistent/eu.shhshm.PortPilot.test.plist"))
     }
 
     func testCommandSummaryQuoting() {
@@ -274,7 +275,7 @@ final class LaunchdPlistTests: XCTestCase {
                         keepAlive: false, isDisabled: false, isLoaded: false, pid: nil, lastExitStatus: nil, ports: [])
         }
         XCTAssertTrue(item("/Library/LaunchAgents/com.adobe.ccxprocess.plist").isSharedAgent)
-        XCTAssertFalse(item("/Users/me/Library/LaunchAgents/com.claude.monitor.plist").isSharedAgent)
+        XCTAssertFalse(item("/Users/me/Library/LaunchAgents/com.example.uptime-monitor.plist").isSharedAgent)
     }
 }
 
@@ -358,7 +359,7 @@ final class DockerParsingTests: XCTestCase {
             basic("ssh"), details: details("/usr/bin/ssh", ["ssh: /Users/me/.colima/_lima/colima/ssh.sock [mux]"])))
         XCTAssertTrue(DockerService.isDockerBackend(
             basic("limactl"), details: details("/opt/homebrew/bin/limactl", ["limactl", "hostagent", "--pidfile", "x", "default"])))
-        XCTAssertFalse(DockerService.isDockerBackend(basic("ssh"), details: details("/usr/bin/ssh", ["/usr/bin/ssh", "-N", "dgx-vnc"])))
+        XCTAssertFalse(DockerService.isDockerBackend(basic("ssh"), details: details("/usr/bin/ssh", ["/usr/bin/ssh", "-N", "build-box"])))
         XCTAssertFalse(DockerService.isDockerBackend(basic("limactl"), details: details("/opt/homebrew/bin/limactl", ["limactl", "list"])))
         XCTAssertFalse(DockerService.isDockerBackend(basic("node"), details: nil))
         XCTAssertFalse(DockerService.isDockerBackend(basic("com.docker"), details: nil), "short prefix must not match")
@@ -424,10 +425,179 @@ final class PM2ParsingTests: XCTestCase {
     }
 
     func testNoDaemonMeansNoProcessesAndNoSubprocess() {
-        let service = PM2Service(pm2Home: "/nonexistent/app.portpilot.tests/.pm2")
+        let service = PM2Service(pm2Home: "/nonexistent/eu.shhshm.PortPilot.tests/.pm2")
         XCTAssertFalse(service.isDaemonRunning())
         XCTAssertTrue(service.processesByPID().isEmpty)
+        XCTAssertTrue(service.processList().isEmpty)
         XCTAssertThrowsError(try service.stop(id: 0))
+        XCTAssertThrowsError(try service.delete(id: 0, name: "api"))
+    }
+
+    // MARK: Cluster mode (finding #9)
+
+    private let clusterJList = """
+    [{"pid":5001,"name":"api","pm_id":0,"pm2_env":{"pm_id":0,"status":"online","exec_mode":"cluster_mode","PORT":"3001"}},
+     {"pid":5002,"name":"api","pm_id":1,"pm2_env":{"pm_id":1,"status":"online","exec_mode":"cluster_mode","env":{"PORT":3001}}},
+     {"pid":5003,"name":"web","pm_id":2,"pm2_env":{"pm_id":2,"status":"online","exec_mode":"fork_mode","env":{"PORT":"8080"}}},
+     {"pid":5004,"name":"web","pm_id":3,"pm2_env":{"pm_id":3,"status":"online","exec_mode":"fork_mode"}},
+     {"pid":0,"name":"cron","pm_id":4,"pm2_env":{"pm_id":4,"status":"stopped","exec_mode":"fork_mode","PORT":"not a port"}}]
+    """
+
+    func testJListExecModeAndPort() {
+        let processes = PM2Service.parseJList(clusterJList)
+        XCTAssertEqual(processes.map(\.id), [0, 1, 2, 3, 4])
+        XCTAssertEqual(processes[0], PM2Process(id: 0, name: "api", pid: 5001, status: "online",
+                                                execMode: "cluster_mode", port: 3001))
+        XCTAssertEqual(processes[1].port, 3001, "PORT from pm2_env.env")
+        XCTAssertTrue(processes[0].isClusterMode && processes[1].isClusterMode)
+        XCTAssertFalse(processes[2].isClusterMode)
+        XCTAssertEqual(processes[2].port, 8080)
+        XCTAssertNil(processes[3].port)
+        XCTAssertNil(processes[4].port)
+    }
+
+    func testCommandsAddressEveryClusterInstance() {
+        let list = PM2Service.parseJList(clusterJList)
+        let cluster: (PM2Process) -> Bool = { $0.isClusterMode }
+        // Stop: a cluster app as a whole (its instances share the daemon's port), a fork instance on its own.
+        XCTAssertEqual(PM2Service.instanceIDs(for: 1, name: nil, in: list, wholeApp: cluster), [0, 1])
+        XCTAssertEqual(PM2Service.instanceIDs(for: 3, name: nil, in: list, wholeApp: cluster), [3])
+        // Delete: every instance of the app.
+        XCTAssertEqual(PM2Service.instanceIDs(for: 2, name: nil, in: list, wholeApp: { _ in true }), [2, 3])
+        // Already gone: nothing (or what is left of the named app), never a stale id that pm2 would reject.
+        XCTAssertEqual(PM2Service.instanceIDs(for: 9, name: nil, in: list, wholeApp: { _ in true }), [])
+        XCTAssertEqual(PM2Service.instanceIDs(for: 9, name: "web", in: list, wholeApp: { _ in true }), [2, 3])
+        // jlist unavailable: fall back to the id we were given.
+        XCTAssertEqual(PM2Service.instanceIDs(for: 7, name: "x", in: nil, wholeApp: { _ in true }), [7])
+    }
+
+    func testDaemonPortsAreAttributedToTheirClusterApp() {
+        func app(_ id: Int, _ name: String, mode: String = "cluster_mode", status: String = "online",
+                 port: UInt16? = nil) -> PM2Process {
+            PM2Process(id: id, name: name, pid: Int32(100 + id), status: status, execMode: mode, port: port)
+        }
+        // One running cluster app owns every port the daemon holds, whatever its PORT says.
+        let single = [app(0, "api", port: 3000), app(1, "api", port: 3000), app(2, "worker", mode: "fork_mode")]
+        XCTAssertEqual(PM2Service.clusterApp(forDaemonPort: 3000, in: single)?.id, 0)
+        XCTAssertEqual(PM2Service.clusterApp(forDaemonPort: 3001, in: single)?.name, "api")
+        // Several cluster apps: matched by PORT; ambiguous or unknown stays unattributed.
+        let several = single + [app(3, "web", port: 8080), app(4, "web", port: 8080), app(5, "admin")]
+        XCTAssertEqual(PM2Service.clusterApp(forDaemonPort: 8080, in: several)?.id, 3)
+        XCTAssertEqual(PM2Service.clusterApp(forDaemonPort: 3000, in: several)?.name, "api")
+        XCTAssertNil(PM2Service.clusterApp(forDaemonPort: 9999, in: several))
+        // Stopped cluster apps hold no socket; fork apps never listen through the daemon.
+        let stopped = [app(0, "api", status: "stopped", port: 3000), app(1, "web", port: 8080)]
+        XCTAssertEqual(PM2Service.clusterApp(forDaemonPort: 3000, in: stopped)?.name, "web")
+        XCTAssertNil(PM2Service.clusterApp(forDaemonPort: 3000, in: [app(0, "solo", mode: "fork_mode", port: 3000)]))
+        XCTAssertEqual(PM2Service.clusterApp(forDaemonPort: 47135, in: PM2Service.parseJList(clusterJList))?.name, "api")
+    }
+
+    // MARK: Saved list (finding #10)
+
+    private func makeDump(_ entries: [[String: Any]]) throws -> (directory: URL, dump: URL) {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PortPilotTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let dump = directory.appendingPathComponent("dump.pm2")
+        try JSONSerialization.data(withJSONObject: entries, options: [.prettyPrinted]).write(to: dump)
+        return (directory, dump)
+    }
+
+    func testDeleteRemovesOnlyThatAppFromTheSavedList() throws {
+        let saved: [[String: Any]] = [
+            ["name": "api", "pm_id": 0, "exec_mode": "cluster_mode", "pm_exec_path": "/srv/api/index.js"],
+            ["name": "api", "pm_id": 1, "exec_mode": "cluster_mode", "pm_exec_path": "/srv/api/index.js"],
+            ["name": "web", "pm_id": 2, "env": ["PORT": "8080", "URL": "https://x.test/a/b"], "autorestart": true],
+            ["name": "worker", "pm_id": 3, "max_memory_restart": 1.5],
+        ]
+        let (directory, dump) = try makeDump(saved)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: dump.path)
+        let original = try Data(contentsOf: dump)
+
+        XCTAssertEqual(PM2Service.removeApp(named: "api", fromDumpAt: dump), .removed(2))
+
+        let remaining = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: dump)) as? [[String: Any]])
+        XCTAssertEqual(remaining.compactMap { $0["name"] as? String }, ["web", "worker"])
+        XCTAssertEqual(NSDictionary(dictionary: remaining[0]), NSDictionary(dictionary: saved[2]), "other apps untouched")
+        XCTAssertEqual(NSDictionary(dictionary: remaining[1]), NSDictionary(dictionary: saved[3]))
+        XCTAssertFalse(String(decoding: try Data(contentsOf: dump), as: UTF8.self).contains("\\/"), "slashes stay readable")
+        XCTAssertEqual(try Data(contentsOf: directory.appendingPathComponent("dump.pm2.bak")), original, "backup kept")
+        let permissions = try FileManager.default.attributesOfItem(atPath: dump.path)[.posixPermissions] as? NSNumber
+        XCTAssertEqual(permissions?.intValue, 0o600, "permissions kept")
+
+        // Nothing left to remove: the file is not rewritten.
+        let before = try Data(contentsOf: dump)
+        XCTAssertEqual(PM2Service.removeApp(named: "api", fromDumpAt: dump), .notSaved)
+        XCTAssertEqual(try Data(contentsOf: dump), before)
+    }
+
+    func testSavedListEdgeCases() throws {
+        let missing = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PortPilotTests-\(UUID().uuidString)/dump.pm2")
+        XCTAssertEqual(PM2Service.removeApp(named: "api", fromDumpAt: missing), .notSaved)
+        XCTAssertNil(PM2SavedListUpdate.notSaved.note)
+        XCTAssertNil(PM2SavedListUpdate.removed(1).note)
+
+        let (directory, dump) = try makeDump([])
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try Data("{ not json".utf8).write(to: dump)
+        let result = PM2Service.removeApp(named: "api", fromDumpAt: dump)
+        guard case .unavailable = result else { return XCTFail("\(result)") }
+        XCTAssertNotNil(result.note, "the user is told to run pm2 save")
+        XCTAssertEqual(try Data(contentsOf: dump), Data("{ not json".utf8), "an unreadable list is left alone")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.appendingPathComponent("dump.pm2.bak").path))
+    }
+}
+
+// MARK: - launchd: reversible disable (finding #12)
+
+final class LaunchdReversibleDisableTests: XCTestCase {
+    func testOnlyAgentsInLaunchAgentsFoldersCanBeDisabledReversibly() throws {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PortPilotTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let agents = home.appendingPathComponent("Library/LaunchAgents", isDirectory: true)
+        let elsewhere = home.appendingPathComponent("code/app", isDirectory: true)
+        try FileManager.default.createDirectory(at: agents, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: elsewhere, withIntermediateDirectories: true)
+        let service = LaunchdService(uid: 501, homeDirectory: home.path)
+
+        func writePlist(_ label: String, in directory: URL, extra: [String: Any] = [:]) throws -> String {
+            var plist: [String: Any] = ["Label": label, "ProgramArguments": ["/bin/sleep", "60"], "RunAtLoad": true]
+            plist.merge(extra) { $1 }
+            let url = directory.appendingPathComponent("\(label).plist")
+            try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0).write(to: url)
+            return url.path
+        }
+        func job(_ label: String, _ path: String?, domain: String = "gui/501") -> LaunchdJob {
+            LaunchdJob(label: label, domain: domain, plistPath: path, keepAlive: true, runAtLoad: true, pid: 123)
+        }
+
+        let managed = try writePlist("eu.shhshm.PortPilot.selftest.managed", in: agents)
+        XCTAssertTrue(service.isManageable(plistPath: managed))
+        XCTAssertTrue(service.canDisableReversibly(job: job("eu.shhshm.PortPilot.selftest.managed", managed)))
+        XCTAssertTrue(service.isManageable(plistPath: "/Library/LaunchAgents/com.example.agent.plist"))
+
+        // A plist bootstrapped from a project folder, an SMAppService helper (no path), an app bundle plist.
+        let project = try writePlist("eu.shhshm.PortPilot.selftest.project", in: elsewhere)
+        XCTAssertFalse(service.isManageable(plistPath: project))
+        XCTAssertFalse(service.canDisableReversibly(job: job("eu.shhshm.PortPilot.selftest.project", project)))
+        XCTAssertFalse(service.canDisableReversibly(job: job("com.openai.chat-helper", nil)))
+        XCTAssertFalse(service.isManageable(plistPath: "/Applications/Avast.app/Contents/Resources/com.avast.av.gui.plist"))
+        XCTAssertFalse(service.isManageable(plistPath: agents.path + "/nested/x.plist"))
+        XCTAssertFalse(service.isManageable(plistPath: agents.path + "/../LaunchAgents-other/x.plist"))
+        XCTAssertFalse(service.isManageable(plistPath: "relative/x.plist"))
+
+        // In the folder but not what Startup Items would show: other label, LoginWindow-only, Apple, daemon domain.
+        XCTAssertFalse(service.canDisableReversibly(job: job("eu.shhshm.PortPilot.selftest.other", managed)))
+        let loginWindow = try writePlist("eu.shhshm.PortPilot.selftest.prelogin", in: agents,
+                                         extra: ["LimitLoadToSessionType": "LoginWindow"])
+        XCTAssertFalse(service.canDisableReversibly(job: job("eu.shhshm.PortPilot.selftest.prelogin", loginWindow)))
+        let apple = try writePlist("com.apple.selftest", in: agents)
+        XCTAssertFalse(service.canDisableReversibly(job: job("com.apple.selftest", apple)))
+        XCTAssertFalse(service.canDisableReversibly(job: job("eu.shhshm.PortPilot.selftest.managed", managed,
+                                                             domain: "system")))
     }
 }
 
@@ -492,7 +662,7 @@ final class ShellServiceTests: XCTestCase {
     }
 
     func testRunMissingExecutableAndTool() {
-        XCTAssertEqual(Shell.run("/nonexistent/app.portpilot.tool", []).status, Shell.notFoundStatus)
+        XCTAssertEqual(Shell.run("/nonexistent/eu.shhshm.PortPilot.tool", []).status, Shell.notFoundStatus)
         XCTAssertEqual(Shell.runTool("app-portpilot-definitely-missing-tool", []).status, Shell.notFoundStatus)
         XCTAssertNil(Shell.which("app-portpilot-definitely-missing-tool"))
     }

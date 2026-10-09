@@ -38,6 +38,8 @@ enum Theme {
     static let hairline = Color.primary.opacity(0.09)
     /// Opaque stand-in for the menu material, used when rendering snapshots offscreen.
     static let snapshotBackground = Color(nsColor: .windowBackgroundColor)
+    /// Opaque base for things that float over the list (the banner).
+    static let floatingBackground = Color(nsColor: .windowBackgroundColor)
 }
 
 extension Font {
@@ -141,8 +143,61 @@ struct IconButton: View {
     }
 }
 
+/// Click logic of `ConfirmButton`, kept free of UI so it can be unit tested.
+///
+/// The first click arms. A later click confirms only once the system double-click interval has passed since
+/// arming, and never as the second click of a double-click: SwiftUI fires a Button on every mouse-up, so without
+/// this guard a habitual double-click would arm *and* confirm before the "Confirm" label is even drawn.
+struct ConfirmGate: Equatable {
+    enum Outcome: Equatable {
+        case armed
+        /// Too soon after arming (or part of a double-click): stays armed, nothing runs.
+        case ignored
+        case confirmed
+    }
+
+    private(set) var armedAt: Date?
+    var isArmed: Bool { armedAt != nil }
+
+    /// - Parameters:
+    ///   - clickCount: click count of the mouse event behind this activation (1 for keyboard / VoiceOver).
+    ///   - doubleClickInterval: `NSEvent.doubleClickInterval` in the app; injectable for tests.
+    mutating func click(at now: Date, clickCount: Int = 1, doubleClickInterval: TimeInterval) -> Outcome {
+        guard let armedAt else {
+            self.armedAt = now
+            return .armed
+        }
+        if clickCount > 1 || now.timeIntervalSince(armedAt) < doubleClickInterval {
+            return .ignored
+        }
+        self.armedAt = nil
+        return .confirmed
+    }
+
+    mutating func disarm() {
+        armedAt = nil
+    }
+
+    /// Click count of the event being handled; 1 for anything that isn't a mouse click (asking a key event for
+    /// its `clickCount` raises an exception).
+    @MainActor
+    static var currentClickCount: Int {
+        guard let event = NSApp?.currentEvent else { return 1 }
+        switch event.type {
+        case .leftMouseDown, .leftMouseUp, .rightMouseDown, .rightMouseUp, .otherMouseDown, .otherMouseUp:
+            return event.clickCount
+        default:
+            return 1
+        }
+    }
+}
+
 /// Inline two-step confirmation for destructive actions. Alerts and sheets would dismiss the
-/// MenuBarExtra window, so the first click arms the button for `timeout` and a second click runs `action`.
+/// MenuBarExtra window, so the first click arms the button for `timeout` and a second click runs `action`
+/// (see `ConfirmGate` for the double-click guard).
+///
+/// With an empty `title` and a `systemImage` it rests as an icon-only button that looks like `IconButton`
+/// and expands to "! <confirmTitle>" while armed.
 struct ConfirmButton: View {
     let title: String
     var confirmTitle = "Confirm"
@@ -152,50 +207,79 @@ struct ConfirmButton: View {
     var foreground: AnyShapeStyle? = nil
     var timeout: Duration = .seconds(3)
     var font: Font = .system(size: 12, weight: .medium)
+    /// Resting tooltip; defaults to `title`.
+    var help: String? = nil
+    /// Tooltip while armed: say what the second click will do.
+    var armedHelp = "Click again to confirm"
+    /// Resting VoiceOver label; defaults to `title` (required for icon-only buttons).
+    var accessibilityName: String? = nil
+    /// Point size of the resting icon of an icon-only button (matches `IconButton`'s `size`).
+    var iconSize: CGFloat = 13
     let action: () -> Void
 
-    @State private var isArmed = false
+    @State private var gate = ConfirmGate()
     @State private var disarmTask: Task<Void, Never>?
 
+    private var isArmed: Bool { gate.isArmed }
+    private var isIconOnly: Bool { title.isEmpty && systemImage != nil }
+
     var body: some View {
-        Button {
-            if isArmed {
-                disarm()
-                action()
+        Button(action: handleClick) {
+            if isIconOnly && !isArmed, let systemImage {
+                Image(systemName: systemImage)
+                    .font(.system(size: iconSize, weight: .medium))
+                    .frame(width: 18, height: 18)
             } else {
-                arm()
-            }
-        } label: {
-            HStack(spacing: 5) {
-                if let systemImage {
-                    Image(systemName: isArmed ? "exclamationmark.circle.fill" : systemImage)
-                        .font(.system(size: 11.5, weight: .semibold))
+                HStack(spacing: 5) {
+                    if let systemImage {
+                        Image(systemName: isArmed ? "exclamationmark.circle.fill" : systemImage)
+                            .font(.system(size: 11.5, weight: .semibold))
+                    }
+                    Text(isArmed ? confirmTitle : title)
+                        .lineLimit(1)
                 }
-                Text(isArmed ? confirmTitle : title)
-                    .lineLimit(1)
+                .font(font)
             }
-            .font(font)
         }
-        .buttonStyle(HoverButtonStyle(foreground: foreground, hoverTint: tint, isEmphasized: isArmed))
-        .help(isArmed ? "Click again to confirm" : title)
-        .accessibilityLabel(isArmed ? confirmTitle : title)
+        .buttonStyle(HoverButtonStyle(
+            padding: isIconOnly && !isArmed ? EdgeInsets(top: 2, leading: 2, bottom: 2, trailing: 2)
+                                            : EdgeInsets(top: 3, leading: 7, bottom: 3, trailing: 7),
+            foreground: foreground, hoverTint: tint, isEmphasized: isArmed))
+        .help(isArmed ? armedHelp : (help ?? title))
+        .accessibilityLabel(isArmed ? confirmTitle : (accessibilityName ?? title))
+        .accessibilityHint(isArmed ? armedHelp : "Asks to confirm first")
         .onDisappear { disarm() }
     }
 
-    private func arm() {
-        withAnimation(.easeOut(duration: 0.15)) { isArmed = true }
+    private func handleClick() {
+        var gate = self.gate
+        let outcome = gate.click(at: Date(), clickCount: ConfirmGate.currentClickCount,
+                                 doubleClickInterval: NSEvent.doubleClickInterval)
+        switch outcome {
+        case .armed:
+            withAnimation(.easeOut(duration: 0.15)) { self.gate = gate }
+            scheduleDisarm()
+        case .ignored:
+            break
+        case .confirmed:
+            disarm()
+            action()
+        }
+    }
+
+    private func scheduleDisarm() {
         disarmTask?.cancel()
         disarmTask = Task { @MainActor in
             try? await Task.sleep(for: timeout)
             guard !Task.isCancelled else { return }
-            withAnimation(.easeOut(duration: 0.2)) { isArmed = false }
+            withAnimation(.easeOut(duration: 0.2)) { gate.disarm() }
         }
     }
 
     private func disarm() {
         disarmTask?.cancel()
         disarmTask = nil
-        isArmed = false
+        gate.disarm()
     }
 }
 
@@ -263,6 +347,117 @@ struct PortChip: View {
             Button("Copy URL") { store.copy(url) }
             Button("Copy Port") { store.copy(String(port)) }
         }
+    }
+}
+
+/// A name followed by a secondary detail on one line, without ever drawing the detail as a clipped one-glyph
+/// sliver: the full detail when both fit, else the full name plus a truncated detail of at least
+/// `minDetailWidth`, else the name alone (truncated as the caller set up). Both views should be single-line.
+struct NameAndDetail<Name: View, Detail: View>: View {
+    var spacing: CGFloat = 5
+    var minDetailWidth: CGFloat = 36
+    var alignment: VerticalAlignment = .firstTextBaseline
+    let name: Name
+    let detail: Detail
+
+    var body: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: alignment, spacing: spacing) {
+                name.fixedSize()
+                detail.fixedSize()
+            }
+            HStack(alignment: alignment, spacing: spacing) {
+                name.fixedSize()
+                detail.frame(minWidth: minDetailWidth, idealWidth: minDetailWidth, alignment: .leading)
+            }
+            name
+        }
+    }
+}
+
+/// How many port chips a row shows before the rest collapse into "+N". Pure, so it is unit tested.
+enum PortChipOverflow {
+    /// Chip slots per row: wide enough for the common 1–3 ports, small enough that a row never grows past the panel.
+    static let defaultLimit = 3
+
+    /// Up to `limit` ports show as chips; with more, the last slot becomes "+N"
+    /// (e.g. limit 3: [a, b, c] → a b c, [a, b, c, d] → a b +2).
+    static func split(_ ports: [UInt16], limit: Int = defaultLimit) -> (shown: [UInt16], hidden: [UInt16]) {
+        let limit = max(1, limit)
+        let shownCount = ports.count > limit ? limit - 1 : ports.count
+        return (Array(ports.prefix(shownCount)), Array(ports.dropFirst(shownCount)))
+    }
+
+    /// ":3000  :3001" for tooltips.
+    static func list(_ ports: [UInt16]) -> String {
+        ports.map { ":\($0)" }.joined(separator: "  ")
+    }
+}
+
+/// A row's port chips, capped by `PortChipOverflow` so any number of ports takes bounded width: the chips are
+/// `.fixedSize()` (never squeezed), which is only safe because the count is capped.
+struct CappedPortChips<Chip: View, Overflow: View>: View {
+    let ports: [UInt16]
+    var limit = PortChipOverflow.defaultLimit
+    var spacing: CGFloat = 4
+    @ViewBuilder let chip: (UInt16) -> Chip
+    /// The "+N" element for the ports that didn't fit (receives them).
+    @ViewBuilder let overflow: ([UInt16]) -> Overflow
+
+    var body: some View {
+        let split = PortChipOverflow.split(ports, limit: limit)
+        HStack(spacing: spacing) {
+            ForEach(split.shown, id: \.self) { port in
+                chip(port)
+            }
+            if !split.hidden.isEmpty {
+                overflow(split.hidden)
+            }
+        }
+        .fixedSize()
+    }
+}
+
+/// The "+N" chip face.
+struct OverflowChipLabel: View {
+    let count: Int
+    var compact = false
+
+    var body: some View {
+        Text(verbatim: "+\(count)")
+            .font(.system(size: compact ? 10.5 : 11, weight: .semibold).monospacedDigit())
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, compact ? 4 : 5)
+            .padding(.vertical, compact ? 1.5 : 2.5)
+            .background(RoundedRectangle(cornerRadius: 5, style: .continuous).fill(Theme.chipFill))
+            .contentShape(Rectangle())
+    }
+}
+
+/// "+N" chip that opens a menu of the hidden ports, so every port stays one click from the browser.
+struct HiddenPortsMenu: View {
+    let ports: [UInt16]
+    var compact = false
+    let store: AppStore
+
+    var body: some View {
+        Menu {
+            ForEach(ports, id: \.self) { port in
+                Button("Open localhost:\(String(port))") { store.openInBrowser(port: port) }
+            }
+            Divider()
+            Button(ports.count == 1 ? "Copy Port" : "Copy Ports") {
+                store.copy(ports.map { String($0) }.joined(separator: " "))
+            }
+        } label: {
+            OverflowChipLabel(count: ports.count, compact: compact)
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("Also listening on " + PortChipOverflow.list(ports))
+        .accessibilityLabel("\(ports.count) more \(ports.count == 1 ? "port" : "ports")")
     }
 }
 
@@ -408,7 +603,7 @@ extension SectionHeader where Accessory == EmptyView {
 enum DisplayText {
     /// Command line for display: home-directory paths shortened to "~/…" (tooltips keep the full text).
     static func command(_ commandLine: String) -> String {
-        let home = NSHomeDirectory()
+        let home = Format.displayHome
         guard home.count > 1 else { return commandLine }
         return commandLine.replacingOccurrences(of: home + "/", with: "~/")
     }
@@ -496,17 +691,21 @@ struct FlowLayout: Layout {
 struct AppGlyph: View {
     var size: CGFloat = 28
 
+    /// The app icon in miniature: the "PP" logo on a white continuous-corner tile.
     var body: some View {
         RoundedRectangle(cornerRadius: size * 0.27, style: .continuous)
-            .fill(LinearGradient(colors: [Color(red: 0.28, green: 0.56, blue: 1.0), Color(red: 0.16, green: 0.36, blue: 0.92)],
+            .fill(LinearGradient(colors: [.white, Color(red: 0.93, green: 0.94, blue: 0.96)],
                                  startPoint: .top, endPoint: .bottom))
             .overlay(
-                Image(systemName: "network")
-                    .font(.system(size: size * 0.52, weight: .semibold))
-                    .foregroundStyle(.white))
+                Image("Logo")
+                    .resizable()
+                    .interpolation(.high)
+                    .aspectRatio(contentMode: .fit)
+                    .padding(size * 0.12))
             .overlay(
                 RoundedRectangle(cornerRadius: size * 0.27, style: .continuous)
-                    .strokeBorder(Color.white.opacity(0.18), lineWidth: 0.5))
+                    .strokeBorder(Color.black.opacity(0.10), lineWidth: 0.5))
+            .shadow(color: .black.opacity(0.12), radius: 1, y: 0.5)
             .frame(width: size, height: size)
             .accessibilityHidden(true)
     }
@@ -671,6 +870,9 @@ extension ProcessManager {
 
 /// Reports whether the hosting window is on screen. MenuBarExtra(.window) keeps its content alive between
 /// openings (onAppear/onDisappear are unreliable there), so we watch the NSWindow's occlusion state instead.
+/// Becoming key also counts as visible: it is posted synchronously while the panel opens, before the first
+/// frame is drawn, whereas the occlusion notification arrives a moment later. PanelView only builds its list
+/// while visible, so reporting early avoids an empty first frame.
 struct WindowVisibilityReader: NSViewRepresentable {
     let onChange: (Bool) -> Void
 
@@ -700,6 +902,11 @@ struct WindowVisibilityReader: NSViewRepresentable {
                                              object: window, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated { self?.report() }
             })
+            for name in [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification] {
+                tokens.append(center.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.report() }
+                })
+            }
             tokens.append(center.addObserver(forName: NSWindow.willCloseNotification,
                                              object: window, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated { self?.onChange?(false) }
@@ -709,7 +916,13 @@ struct WindowVisibilityReader: NSViewRepresentable {
 
         private func report() {
             guard let window else { return }
-            onChange?(window.isVisible && window.occlusionState.contains(.visible))
+            onChange?(Self.isOnScreen(isVisible: window.isVisible, isKey: window.isKeyWindow,
+                                      occlusionVisible: window.occlusionState.contains(.visible)))
+        }
+
+        /// Ordered in, and either reported visible by the window server or key (the panel is opening).
+        nonisolated static func isOnScreen(isVisible: Bool, isKey: Bool, occlusionVisible: Bool) -> Bool {
+            isVisible && (occlusionVisible || isKey)
         }
 
         private func removeObservers() {
@@ -720,5 +933,63 @@ struct WindowVisibilityReader: NSViewRepresentable {
         deinit {
             tokens.forEach(NotificationCenter.default.removeObserver)
         }
+    }
+}
+
+// MARK: - Switches
+
+/// The native switch. In offscreen snapshots (README screenshots) AppKit draws an "on" switch in the grey of an
+/// inactive window, because that window is never key, so there an accent-coloured face is drawn over the native
+/// switch's own frame to show it as it looks in the open panel.
+struct PanelSwitchStyle: ToggleStyle {
+    @Environment(\.isSnapshotRendering) private var isSnapshotRendering
+
+    func makeBody(configuration: Configuration) -> some View {
+        if isSnapshotRendering && configuration.isOn {
+            SnapshotSwitchFace()
+        } else {
+            Toggle(configuration)
+                .toggleStyle(.switch)
+        }
+    }
+}
+
+/// An "on" switch: accent capsule with a white knob on the trailing side, at the native switch's track size.
+private struct SnapshotSwitchFace: View {
+    @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.controlSize) private var controlSize
+
+    private var trackSize: CGSize {
+        switch controlSize {
+        case .mini: return CGSize(width: 36, height: 16)
+        case .small: return CGSize(width: 42, height: 19)
+        case .large, .extraLarge: return CGSize(width: 58, height: 26)
+        default: return CGSize(width: 50, height: 22)
+        }
+    }
+
+    var body: some View {
+        let size = trackSize
+        ZStack(alignment: .trailing) {
+            Capsule().fill(Color.accentColor)
+            Circle()
+                .fill(.white)
+                .shadow(color: .black.opacity(0.22), radius: 0.6, y: 0.5)
+                .padding(max(1, size.height * 0.08))
+        }
+        .frame(width: size.width, height: size.height)
+        .opacity(isEnabled ? 1 : 0.45)
+    }
+}
+
+private struct SnapshotRenderingKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+extension EnvironmentValues {
+    /// True while SnapshotRenderer draws a view offscreen.
+    var isSnapshotRendering: Bool {
+        get { self[SnapshotRenderingKey.self] }
+        set { self[SnapshotRenderingKey.self] = newValue }
     }
 }

@@ -6,8 +6,10 @@ import SwiftUI
 ///     vite  frontend  :5330                         2.4% · 260 MB  ⊗
 ///     PID 48211  node …/node_modules/.bin/vite --port 5330
 ///
-/// Hovering shows the full command line. ⌥-click on the stop button kills only this PID
-/// (instead of the whole kill plan: runner + children).
+/// Hovering shows the full command line. The stop button ends this process's kill plan (runner + children);
+/// ⌥-click force-kills it (SIGKILL), exactly like the group's stop button. "Stop Only This Process" in the
+/// context menu ends just this PID. Apps, macOS services and other users' processes need a second click
+/// (see `StopSafety`).
 struct ProcessRow: View {
     let process: ListenerProcess
     let store: AppStore
@@ -19,16 +21,8 @@ struct ProcessRow: View {
         HStack(alignment: .top, spacing: 6) {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(alignment: .center, spacing: 6) {
-                    Text(process.displayName)
-                        .font(.system(size: 12, weight: .medium))
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                    if let subpath = process.project?.subpath, !subpath.isEmpty {
-                        Text(subpath)
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
+                    nameAndSubpath
+                        .layoutPriority(1) // the Spacer gives way first; the capped port chips never shrink
                     if process.isRestricted {
                         Image(systemName: "lock.fill")
                             .font(.system(size: 9))
@@ -36,15 +30,14 @@ struct ProcessRow: View {
                             .help("Owned by another user — details unavailable, stopping may ask for an administrator password")
                             .accessibilityLabel("Owned by another user")
                     }
-                    HStack(spacing: 3) {
-                        ForEach(process.ports, id: \.self) { port in
-                            PortChip(port: port,
-                                     isExposed: process.sockets.contains { $0.port == port && $0.isExposed },
-                                     compact: true,
-                                     store: store)
-                        }
+                    CappedPortChips(ports: process.ports, spacing: 3) { port in
+                        PortChip(port: port,
+                                 isExposed: process.sockets.contains { $0.port == port && $0.isExposed },
+                                 compact: true,
+                                 store: store)
+                    } overflow: { hidden in
+                        HiddenPortsMenu(ports: hidden, compact: true, store: store)
                     }
-                    .fixedSize()
                     Spacer(minLength: 6)
                     UsagePill(usage: process.treeUsage,
                               cpuIsHeavy: process.treeUsage.cpuPercent >= store.settings.heavyCPUThreshold,
@@ -61,11 +54,11 @@ struct ProcessRow: View {
                             .font(.system(size: 10.5, weight: .medium))
                             .foregroundStyle(.secondary)
                             .fixedSize()
-                            .help("Reloaded on file changes by \(name) — Stop ends the watcher too")
+                            .help(Self.watcherHelp(for: name))
                     }
                     Text(DisplayText.command(process.commandLine))
                         .font(.command)
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
                 }
@@ -84,19 +77,68 @@ struct ProcessRow: View {
         .accessibilityLabel("\(process.displayName), PID \(String(process.basic.pid))")
     }
 
+    /// Name plus the package folder ("frontend"); the folder is dropped rather than clipped to a sliver.
+    @ViewBuilder
+    private var nameAndSubpath: some View {
+        let name = Text(process.displayName)
+            .font(.system(size: 12, weight: .medium))
+            .lineLimit(1)
+            .truncationMode(.tail)
+        if let subpath = process.project?.subpath, !subpath.isEmpty {
+            NameAndDetail(spacing: 6, name: name,
+                          detail: Text(subpath)
+                              .font(.system(size: 11))
+                              .foregroundStyle(.secondary)
+                              .lineLimit(1))
+        } else {
+            name
+        }
+    }
+
+    private var stopHelp: String { "Stop this process and its runner — ⌥-click to force kill" }
+
+    /// Tooltip for the watcher label. supervisord runs many programs, so Stop never ends it (KillPlanner).
+    static func watcherHelp(for name: String) -> String {
+        if name == "supervisord" {
+            return "Run by supervisord, which may start it again — use supervisorctl to stop it for good"
+        }
+        return "Reloaded on file changes by \(name) — Stop ends the watcher too"
+    }
+
     @ViewBuilder
     private var stopButton: some View {
-        IconButton(systemImage: "xmark.circle",
-                   label: "Stop \(process.displayName)",
-                   help: "Stop this process and its runner — ⌥-click to stop only PID \(process.basic.pid)",
-                   size: 12.5,
-                   foreground: AnyShapeStyle(.tertiary),
-                   hoverTint: Theme.destructive) {
-            let onlyThis = NSEvent.modifierFlags.contains(.option)
-            store.stop(process, mode: .graceful, onlyThisProcess: onlyThis)
+        switch StopSafety.forProcess(process) {
+        case .unavailable:
+            // Keeps the usage column aligned with the other process rows.
+            Color.clear
+                .frame(width: 22, height: 22)
+                .accessibilityHidden(true)
+        case .oneClick:
+            IconButton(systemImage: "xmark.circle",
+                       label: "Stop \(process.displayName)",
+                       help: stopHelp,
+                       size: 12.5,
+                       foreground: AnyShapeStyle(.tertiary),
+                       hoverTint: Theme.destructive,
+                       action: stopFromButton)
+                .disabled(isGroupBusy)
+                .padding(.top, -1)
+        case .confirm(let reason):
+            ConfirmButton(title: "", confirmTitle: "Stop?", systemImage: "xmark.circle",
+                          foreground: AnyShapeStyle(.tertiary),
+                          help: stopHelp + " (asks to confirm)",
+                          armedHelp: reason.armedHelp(title: process.displayName),
+                          accessibilityName: "Stop \(process.displayName)",
+                          iconSize: 12.5,
+                          action: stopFromButton)
+                .fixedSize()
+                .disabled(isGroupBusy)
+                .padding(.top, -1)
         }
-        .disabled(isGroupBusy)
-        .padding(.top, -1)
+    }
+
+    private func stopFromButton() {
+        store.stop(process, mode: NSEvent.modifierFlags.contains(.option) ? .force : .graceful)
     }
 
     @ViewBuilder
@@ -110,7 +152,23 @@ struct ProcessRow: View {
         if let cwd = process.details?.cwd, cwd != "/" {
             Button("Reveal Working Directory") { store.revealInFinder(cwd) }
         }
-        Divider()
+        let safety = StopSafety.forProcess(process)
+        if safety.isAvailable {
+            Divider()
+            if let reason = safety.reason {
+                Menu("Stop") {
+                    Text(reason.menuNote)
+                    Divider()
+                    stopItems
+                }
+            } else {
+                stopItems
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var stopItems: some View {
         Button("Stop") { store.stop(process, mode: .graceful) }
             .disabled(isGroupBusy)
         Button("Stop Only This Process") { store.stop(process, mode: .graceful, onlyThisProcess: true) }

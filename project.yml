@@ -1,6 +1,6 @@
 name: PortPilot
 options:
-  bundleIdPrefix: app.portpilot
+  bundleIdPrefix: eu.shhshm
   deploymentTarget:
     macOS: "14.0"
   createIntermediateGroups: true
@@ -24,7 +24,7 @@ targets:
       - path: PortPilot
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: app.portpilot.PortPilot
+        PRODUCT_BUNDLE_IDENTIFIER: eu.shhshm.PortPilot
         PRODUCT_NAME: PortPilot
         INFOPLIST_FILE: PortPilot/Resources/Info.plist
         GENERATE_INFOPLIST_FILE: NO
@@ -42,7 +42,7 @@ targets:
       - target: PortPilot
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: app.portpilot.PortPilotTests
+        PRODUCT_BUNDLE_IDENTIFIER: eu.shhshm.PortPilotTests
         GENERATE_INFOPLIST_FILE: YES
         BUNDLE_LOADER: "$(TEST_HOST)"
         TEST_HOST: "$(BUILT_PRODUCTS_DIR)/PortPilot.app/Contents/MacOS/PortPilot"

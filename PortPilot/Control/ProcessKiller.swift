@@ -30,24 +30,38 @@ final class ProcessKiller: Sendable {
     ///   `Shell.runAsAdmin` with a start-time guard (the admin prompt can take a while; the PID must not be reused
     ///   by then). Otherwise they are reported as failures.
     ///
+    /// With `escalate` false, a graceful stop never sends SIGKILL: targets still running after `timeout` are
+    /// reported as failures ("Still running — use Force Kill"). Used for apps and macOS services, which should
+    /// only be killed when the user explicitly picks Force Kill.
+    ///
     /// `StopResult.stopped` lists every target confirmed gone (including ones that had already exited);
     /// `escalated` is true whenever SIGKILL was actually sent (graceful escalation, or `.force`).
-    func stop(_ plan: KillPlan, mode: StopMode, timeout: TimeInterval, allowAdmin: Bool) async -> StopResult {
+    func stop(_ plan: KillPlan, mode: StopMode, timeout: TimeInterval, allowAdmin: Bool,
+              escalate: Bool = true) async -> StopResult {
         await Task.detached(priority: .userInitiated) { [self] in
-            await self.execute(plan, mode: mode, timeout: timeout, allowAdmin: allowAdmin)
+            await self.execute(plan, mode: mode, timeout: timeout, allowAdmin: allowAdmin, escalate: escalate)
         }.value
     }
 
     // MARK: - Orchestration
 
-    private func execute(_ plan: KillPlan, mode: StopMode, timeout: TimeInterval, allowAdmin: Bool) async -> StopResult {
+    private func execute(_ plan: KillPlan, mode: StopMode, timeout: TimeInterval, allowAdmin: Bool,
+                         escalate: Bool) async -> StopResult {
         var seenPIDs = Set<Int32>()
-        let targets = plan.targets.filter { seenPIDs.insert($0.pid).inserted }
+        let requested = plan.targets.filter { seenPIDs.insert($0.pid).inserted }
+        var failures: [Int32: String] = [:]
+        // Last line of defence: the planner never targets the PM2 daemon or a Docker backend, and neither does the
+        // killer, whoever built the plan. They are left out of `plannedIdentities` too, so the process-group signal
+        // below refuses a group they belong to (pm2 cluster workers share the daemon's group).
+        let targets = requested.filter { target in
+            guard KillPlanner.isManagerDaemon(target, details: SysProc.details(for: target)) else { return true }
+            failures[target.pid] = "Runs other apps (PM2 daemon or Docker) — not signalled"
+            return false
+        }
         let plannedIdentities = Set(targets.map(\.identity))
         let firstSignal = mode == .graceful ? SIGTERM : SIGKILL
 
         var exited = Set<Int32>()
-        var failures: [Int32: String] = [:]
         var waiting: [ProcessBasic] = []
         var denied: [ProcessBasic] = []
         var escalated = false
@@ -89,7 +103,12 @@ final class ProcessKiller: Sendable {
             waiting = afterTerm.remaining
 
             let groupLeftovers = groupSignalled && processGroupHasMembers(plan.root)
-            if !waiting.isEmpty || groupLeftovers {
+            if !escalate {
+                for survivor in waiting where failures[survivor.pid] == nil {
+                    failures[survivor.pid] = "Still running — use Force Kill"
+                }
+                waiting = []
+            } else if !waiting.isEmpty || groupLeftovers {
                 escalated = true
                 let adminPIDs = Set(adminTargets.map(\.pid))
                 var adminSurvivors: [ProcessBasic] = []
@@ -115,11 +134,11 @@ final class ProcessKiller: Sendable {
             failures[survivor.pid] = "Still running after SIGKILL"
         }
 
-        let stopped = targets.map(\.pid).filter { exited.contains($0) }
-        let failureList = targets.compactMap { target in
+        let stopped = requested.map(\.pid).filter { exited.contains($0) }
+        let failureList = requested.compactMap { target in
             failures[target.pid].map { StopFailure(pid: target.pid, reason: $0) }
         }
-        return StopResult(requested: targets.map(\.identity), stopped: stopped, failures: failureList,
+        return StopResult(requested: requested.map(\.identity), stopped: stopped, failures: failureList,
                           escalated: escalated)
     }
 

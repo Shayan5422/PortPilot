@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds PortPilot.app (Release, ad-hoc signed) and copies it to dist/PortPilot.app.
+# Builds PortPilot.app (Release; Apple Development–signed when available, else ad-hoc) and copies it to dist/PortPilot.app.
 #
 # Usage: scripts/build.sh [--test]
 #   --test    run the unit tests (xcodebuild test) before the Release build
@@ -13,7 +13,7 @@ usage() {
     cat <<'EOF'
 Usage: scripts/build.sh [--test]
 
-Builds PortPilot.app (Release, ad-hoc signed) into dist/PortPilot.app.
+Builds PortPilot.app (Release) into dist/PortPilot.app.
 
   --test       run the unit tests (xcodebuild test) before the Release build
   -h, --help   show this help
@@ -53,6 +53,22 @@ fi
 
 mkdir -p build
 
+# Signing for local builds. A stable "Apple Development" signature (when one is in the keychain) lets macOS
+# remember privacy permissions such as Downloads folder access across rebuilds; an ad-hoc signature changes
+# with every build, so macOS would ask again each time. Set PORTPILOT_ADHOC=1 to force ad-hoc signing.
+SIGN_ARGS=(CODE_SIGN_IDENTITY=-)
+if [[ -z "${PORTPILOT_ADHOC:-}" ]]; then
+    dev_identity="$(security find-identity -v -p codesigning 2>/dev/null | awk '/"Apple Development: / {print $2; exit}')"
+    if [[ -n "$dev_identity" ]]; then
+        dev_team="$(security find-certificate -a -Z -p -c "Apple Development: " 2>/dev/null \
+            | awk -v sha="$dev_identity" '/^SHA-1 hash:/ {take = ($3 == sha)} take' \
+            | openssl x509 -noout -subject 2>/dev/null | sed -nE 's/.*OU ?= ?([A-Z0-9]{10}).*/\1/p')"
+        if [[ -n "$dev_team" ]]; then
+            SIGN_ARGS=(CODE_SIGN_IDENTITY="$dev_identity" DEVELOPMENT_TEAM="$dev_team")
+        fi
+    fi
+fi
+
 # Runs xcodebuild with all output going to a log file. On failure, prints the error lines
 # (deduplicated, in order) or the tail of the log when no error line could be recognised.
 run_xcodebuild() {
@@ -89,7 +105,7 @@ if [[ "$run_tests" -eq 1 ]]; then
         -project "$PROJECT" -scheme "$SCHEME" -configuration Debug \
         -derivedDataPath "$DERIVED_DATA" \
         -destination "platform=macOS,arch=$(uname -m)" \
-        CODE_SIGN_IDENTITY=- \
+        "${SIGN_ARGS[@]}" \
         test
     printf '    tests passed\n'
 fi
@@ -99,7 +115,7 @@ run_xcodebuild build/xcodebuild-release.log \
     -project "$PROJECT" -scheme "$SCHEME" -configuration Release \
     -derivedDataPath "$DERIVED_DATA" \
     -destination "generic/platform=macOS" \
-    CODE_SIGN_IDENTITY=- \
+    "${SIGN_ARGS[@]}" \
     build
 
 [[ -d "$PRODUCT" ]] || die "build reported success but $PRODUCT is missing"

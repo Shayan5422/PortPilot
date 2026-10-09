@@ -28,6 +28,11 @@ enum KillPlanner {
             return KillPlan(root: basic, targets: [], summary: [], requiresAdmin: false,
                             warnings: managerWarnings(for: listener.manager))
         }
+        // pm2 cluster mode: the God Daemon itself holds the port. A Docker backend without a container match (docker
+        // CLI missing, daemon unreachable). Either way, signalling it takes down every app it runs.
+        if let warning = managerDaemonWarning(basic, details: listener.details) {
+            return KillPlan(root: basic, targets: [], summary: [], requiresAdmin: false, warnings: [warning])
+        }
 
         // The table must describe *this* process. If the pid exited or was recycled since the scan, never walk
         // the relatives of whatever owns the pid now; the killer will re-verify and skip the stale identity.
@@ -45,7 +50,7 @@ enum KillPlanner {
         }
     }
 
-    /// Plan containing only the listener (Option-click "Kill only this process").
+    /// Plan containing only the listener ("Stop Only This Process" in a process row's context menu).
     static func singleProcessPlan(for listener: ListenerProcess) -> KillPlan {
         singleProcessPlan(for: listener, currentUID: getuid(), ownPID: getpid())
     }
@@ -54,6 +59,9 @@ enum KillPlanner {
     static func singleProcessPlan(for listener: ListenerProcess, currentUID: UInt32, ownPID: Int32) -> KillPlan {
         let basic = listener.basic
         guard basic.pid > 1, basic.pid != ownPID else { return protectedPlan(for: listener) }
+        if let warning = managerDaemonWarning(basic, details: listener.details) {
+            return KillPlan(root: basic, targets: [], summary: [], requiresAdmin: false, warnings: [warning])
+        }
         let requiresAdmin = basic.uid != currentUID
         var warnings = managerWarnings(for: listener.manager)
         if listener.isExposedToNetwork { warnings.append(networkWarning(for: listener)) }
@@ -74,6 +82,23 @@ enum KillPlanner {
         return isLocallyProtected(basic, details: details)
     }
 
+    /// The PM2 God Daemon or a Docker / OrbStack / Colima backend: one process that runs many apps. It is never
+    /// signalled, not even when it is the listener itself (pm2 cluster mode, a backend without a container match).
+    static func isManagerDaemon(_ basic: ProcessBasic, details: ProcessDetails?) -> Bool {
+        PM2Service.isDaemon(basic, details: details) || DockerService.isDockerBackend(basic, details: details)
+    }
+
+    /// Why Stop does nothing for a manager daemon listener; nil for every other process.
+    static func managerDaemonWarning(_ basic: ProcessBasic, details: ProcessDetails?) -> String? {
+        if PM2Service.isDaemon(basic, details: details) {
+            return "This port belongs to the PM2 daemon, which runs all your pm2 apps — stop the app with pm2 instead"
+        }
+        if DockerService.isDockerBackend(basic, details: details) {
+            return "This port belongs to Docker itself — stop the container in Docker instead"
+        }
+        return nil
+    }
+
     /// The planner's own boundary rules, independent of `Classifier` (defence in depth).
     static func isLocallyProtected(_ basic: ProcessBasic, details: ProcessDetails?) -> Bool {
         let names = candidateNames(basic, details: details)
@@ -82,11 +107,15 @@ enum KillPlanner {
         if let arguments = details?.arguments, let argv0 = arguments.first {
             // process.title of the PM2 daemon: "PM2 v5.3.0: God Daemon (/Users/me/.pm2)". Killing it stops every pm2 app.
             if argv0.hasPrefix("PM2 v") || argv0.contains("God Daemon") { return true }
-            // Agent CLIs installed as node/bun scripts: `node /opt/homebrew/bin/claude`.
-            if arguments.count > 1, isInterpreter(normalizedName(argv0)) {
-                let script = normalizedName(arguments[1])
-                let stem = (script as NSString).deletingPathExtension
-                if agentAndEditorNames.contains(script) || agentAndEditorNames.contains(stem) { return true }
+            // Agent CLIs installed as node/bun/python scripts: `node /opt/homebrew/bin/qwen`,
+            // `node --max-old-space-size=8192 /opt/homebrew/bin/gemini`, `python ~/.local/bin/aider`.
+            if isInterpreter(normalizedName(argv0)) || isInterpreter(normalizedName(details?.executablePath ?? "")),
+               let script = scriptOperand(arguments) {
+                let base = normalizedName(script)
+                let stem = base.split(separator: ".", maxSplits: 1).first.map(String.init) ?? base
+                let directory = normalizedName((script as NSString).deletingLastPathComponent)
+                let isShim = directory == "bin" || directory == ".bin" || !base.contains(".")
+                if isShim, agentAndEditorNames.contains(stem) { return true }
             }
             if arguments.contains(where: { $0.hasSuffix("ipykernel_launcher") || $0.hasSuffix("ipykernel_launcher.py") }) {
                 return true
@@ -160,6 +189,11 @@ enum KillPlanner {
         guard name == "node" || name == "nodejs" || name.hasPrefix("python") || name == "ruby" else { return false }
         let options = arguments.dropFirst()
         if options.contains("-i") || options.contains("--interactive") { return true }
+        // `python -m IPython`, `python -m code`, `python -m asyncio`, `python -m pdb app.py`: a REPL or debugger session.
+        if name.hasPrefix("python"), let flag = options.firstIndex(of: "-m"), flag + 1 < arguments.count,
+           replModules.contains(arguments[flag + 1].lowercased()) {
+            return true
+        }
         let codeFlags: Set<String> = ["-c", "-m", "-e", "--eval", "-p", "--print", "-r", "--require", "--import",
                                       "--test", "--run"]
         if options.contains(where: { codeFlags.contains($0) || $0.hasPrefix("--eval=") }) { return false }
@@ -190,12 +224,82 @@ enum KillPlanner {
         name == "node" || name == "nodejs" || name == "bun" || name == "deno" || name.hasPrefix("python")
     }
 
+    /// node or bun running a package manager — the usual top of a dev server's tree. Matches the script form
+    /// (`node /opt/homebrew/bin/npm run dev`, `node …/pnpm.cjs dev`) and npm's process title, which replaces argv
+    /// once npm has started ("npm run dev", "npm exec vite").
+    static func isPackageManagerProcess(_ basic: ProcessBasic, details: ProcessDetails?) -> Bool {
+        guard let arguments = details?.arguments, let argv0 = arguments.first, !argv0.isEmpty else { return false }
+        let runtimeNames = [normalizedName(basic.comm), normalizedName(details?.executablePath ?? "")]
+        guard runtimeNames.contains(where: { $0 == "node" || $0 == "nodejs" || $0 == "bun" }) else { return false }
+        if argv0.contains(" "), !argv0.hasPrefix("/") {
+            let first = argv0.split(separator: " ").first.map(String.init) ?? ""
+            return Classifier.packageManagerNames.contains(first)
+        }
+        guard let script = scriptOperand(arguments) else { return false }
+        return Classifier.isPackageManagerScript(script)
+    }
+
+    /// The program file an interpreter runs: the first operand after its options, skipping option values
+    /// (`node -r dotenv/config server.js` → "server.js"). Subcommand-driven runtimes (bun, deno, java, dotnet, go)
+    /// take the first operand that looks like a file instead (`bun run src/index.ts` → "src/index.ts").
+    /// nil for inline code or modules (`-e`, `-c`, `-m`, `-p`), a bare REPL, or when argv0 is not a runtime.
+    static func scriptOperand(_ arguments: [String]) -> String? {
+        guard let argv0 = arguments.first, let runtime = Classifier.runtimeKey(for: normalizedName(argv0)) else {
+            return nil
+        }
+        let rules = operandRules[runtime] ?? defaultOperandRules
+        var index = 1
+        var operandsSeen = 0
+        while index < arguments.count, operandsSeen < 4 {
+            let argument = arguments[index]
+            index += 1
+            if argument.isEmpty || argument == "--" { continue }
+            if argument.hasPrefix("-") {
+                if rules.inline.contains(argument) || argument.hasPrefix("--eval=") || argument.hasPrefix("--print=") {
+                    return nil
+                }
+                if rules.valued.contains(argument) { index += 1 }
+                continue
+            }
+            operandsSeen += 1
+            guard subcommandDrivenRuntimes.contains(runtime) else { return argument }
+            let base = (argument as NSString).lastPathComponent
+            if argument.contains("/") || (base.contains(".") && !argument.contains(":") && !argument.contains("=")) {
+                return argument
+            }
+        }
+        return nil
+    }
+
+    /// Runtimes whose first operand is a subcommand (`bun run`, `deno task`, `go run`), not the script.
+    private static let subcommandDrivenRuntimes: Set<String> = ["bun", "deno", "java", "dotnet", "go"]
+
+    /// Per runtime: flags whose argument is inline code or a module (no script file follows), and options that
+    /// consume the next argument.
+    private static let operandRules: [String: (inline: Set<String>, valued: Set<String>)] = [
+        "node": (["-e", "--eval", "-p", "--print"],
+                 ["-r", "--require", "--import", "--loader", "--experimental-loader", "--env-file", "--title",
+                  "--inspect-port", "--conditions", "-C", "--watch-path", "--input-type"]),
+        "bun": (["-e", "--eval", "-p", "--print"], ["-r", "--preload", "--cwd", "-c", "--config", "--env-file"]),
+        "deno": ([], ["-c", "--config", "--import-map", "--env-file", "-L", "--log-level"]),
+        "python": (["-c", "-m"], ["-W", "-X", "--check-hash-based-pycs"]),
+        "ruby": (["-e"], ["-I", "-r", "-C", "-E", "-F"]),
+        "perl": (["-e", "-E"], []),
+        "php": (["-r"], ["-S", "-t", "-c", "-d", "-z"]),
+        "java": ([], ["-cp", "-classpath", "--class-path", "-p", "--module-path", "--add-opens", "--add-exports",
+                      "--add-modules"]),
+    ]
+    private static let defaultOperandRules: (inline: Set<String>, valued: Set<String>) = (["-e", "-c"], [])
+
     // MARK: - Labels
 
     /// Short human label for a process, e.g. "npm run dev", "node vite", "python3 -m http.server 8000".
     static func label(for basic: ProcessBasic, details: ProcessDetails?) -> String {
         guard let arguments = details?.arguments, let argv0 = arguments.first, !argv0.isEmpty else { return basic.comm }
         var rest = Array(arguments.dropFirst())
+        if let runtime = Classifier.runtimeKey(for: normalizedName(argv0)) {
+            rest = labelArguments(rest, runtime: runtime)
+        }
         var tokens: [String]
         if isInterpreter(normalizedName(argv0)), let script = rest.first, let tool = packageManagerName(script) {
             tokens = [tool]               // node /opt/homebrew/bin/npm run dev → npm run dev
@@ -210,6 +314,34 @@ enum KillPlanner {
         let text = tokens.joined(separator: " ")
         return text.count > 64 ? String(text.prefix(63)) + "…" : text
     }
+
+    /// An interpreter's arguments without its tuning options before the program: `node --max-old-space-size=4096
+    /// --enable-source-maps server.js` → `server.js` (node's --watch child carries some 25 of them). Options that say
+    /// how it runs (`--watch`, `--hot`, `--inspect`, `-jar`) stay, and so does everything from inline code or a module
+    /// (`-m http.server 8000`, `-e …`) or the program onwards.
+    private static func labelArguments(_ arguments: [String], runtime: String) -> [String] {
+        let rules = operandRules[runtime] ?? defaultOperandRules
+        var kept: [String] = []
+        var index = 0
+        while index < arguments.count {
+            let argument = arguments[index]
+            if argument == "--" { return kept + arguments[(index + 1)...] }
+            if !argument.hasPrefix("-") || argument == "-" || rules.inline.contains(argument) {
+                return kept + arguments[index...]
+            }
+            let name = argument.split(separator: "=", maxSplits: 1).first.map(String.init) ?? argument
+            if labelRuntimeOptions.contains(name) { kept.append(argument) }
+            if rules.valued.contains(argument) { index += 1 }
+            index += 1
+        }
+        return kept
+    }
+
+    /// Interpreter options worth showing in a label.
+    private static let labelRuntimeOptions: Set<String> = [
+        "--watch", "--watch-path", "--hot", "--inspect", "--inspect-brk", "--inspect-wait", "-i", "--interactive",
+        "--test", "-jar",
+    ]
 
     private static func displayToken(_ argument: String, stripLoginDash: Bool) -> String {
         var token = argument
@@ -340,13 +472,19 @@ enum KillPlanner {
     ]
 
     /// Interactive tools a server is commonly launched *from*; they must survive stopping that server.
+    /// Coding agents always run with their cwd in the project, so they must never be mistaken for part of a launch.
     private static let agentAndEditorNames: Set<String> = [
-        "claude", "codex", "gemini", "aider", "opencode", "cursor-agent", "goose", "amp", "copilot", "crush",
+        "claude", "codex", "gemini", "qwen", "kimi", "aider", "opencode", "cursor-agent", "goose", "amp", "copilot",
+        "crush", "droid", "cline", "openhands", "plandex", "pdx", "auggie", "kilo", "kilocode", "codebuff", "grok",
+        "openclaw", "cn", "interpreter",
         "vim", "nvim", "vi", "emacs", "nano", "hx", "helix", "kak",
     ]
 
     /// Names that are always an interactive REPL.
     private static let replOnlyNames: Set<String> = ["irb", "ipython", "ipython3", "bpython", "ptpython", "iex"]
+
+    /// `python -m <module>` REPLs and debuggers.
+    private static let replModules: Set<String> = ["ipython", "code", "asyncio", "pdb", "idlelib", "bpython", "ptpython"]
 
     private static let devRuntimeNames: Set<String> = [
         "node", "nodejs", "bun", "deno", "ruby", "php", "php-fpm", "java", "go", "dotnet", "beam.smp", "erl",
@@ -423,14 +561,21 @@ private struct TreeWalker {
         return !KillPlanner.isProtected(candidate, details: candidateDetails)
     }
 
-    /// Runner (npm, make, turbo…), a non-shell program of the same project (`node scripts/dev.js`), or a
-    /// script-file shell whose script lives in the project (`bash ./scripts/dev.sh`).
+    /// Runner (npm, make, turbo…), package manager (`node …/npm`, npm's "npm run dev" title), file watcher
+    /// (`node --watch`, `uvicorn --reload`, with or without a project), a program that runs code from the project
+    /// (`node scripts/dev.js`, `./target/debug/launcher`), or a script-file shell whose script lives in the project
+    /// (`bash ./scripts/dev.sh`).
     ///
     /// Shells are never anchors through `Classifier.isRunnerProcess`: a `zsh -c "npm run dev"` spawned by a coding
     /// agent or IDE belongs to that tool, so a shell is only ever included *below* a real anchor.
     private func isLaunchAnchor(_ candidate: ProcessBasic, details candidateDetails: ProcessDetails?) -> Bool {
         let mode = KillPlanner.shellMode(candidate, details: candidateDetails)
-        if mode == .notShell, Classifier.isRunnerProcess(basic: candidate, details: candidateDetails) { return true }
+        if mode == .notShell {
+            if Classifier.isRunnerProcess(basic: candidate, details: candidateDetails) { return true }
+            if KillPlanner.isPackageManagerProcess(candidate, details: candidateDetails) { return true }
+            // A watcher left alive restarts the server on the next file change.
+            if Classifier.isWatcherProcess(basic: candidate, details: candidateDetails) { return true }
+        }
         guard let root = projectRoot, let candidateDetails else { return false }
         switch mode {
         case .notShell:
@@ -444,10 +589,23 @@ private struct TreeWalker {
         }
     }
 
+    /// True when the process runs code that lives in the project: its executable is inside the root, or it is an
+    /// interpreter whose script resolves (relative paths against its cwd) inside the root.
+    ///
+    /// The working directory alone proves nothing: coding agents, editors and terminals all sit in the project
+    /// folder, and an agent such as `kimi` or `node /opt/homebrew/bin/qwen` must never become the plan root.
+    /// Arbitrary absolute arguments do not count either (`agent --add-dir /path/to/project`).
     private func belongsToProject(_ details: ProcessDetails, root: String) -> Bool {
-        if let cwd = details.cwd, isPath(cwd, inside: root) { return true }
         if let executable = details.executablePath, isPath(executable, inside: root) { return true }
-        return details.arguments.dropFirst().contains { $0.hasPrefix("/") && isPath($0, inside: root) }
+        guard let script = KillPlanner.scriptOperand(details.arguments) else { return false }
+        let path: String
+        if script.hasPrefix("/") {
+            path = script
+        } else {
+            guard let cwd = details.cwd, cwd.hasPrefix("/") else { return false }
+            path = (cwd as NSString).appendingPathComponent(script)
+        }
+        return isPath((path as NSString).standardizingPath, inside: root)
     }
 
     private func isPath(_ path: String, inside root: String) -> Bool {

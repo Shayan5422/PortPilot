@@ -11,7 +11,7 @@ usage() {
 Usage: scripts/install.sh [--no-build]
 
 Builds PortPilot, installs it to ~/Applications/PortPilot.app and starts it through a
-LaunchAgent (~/Library/LaunchAgents/app.portpilot.agent.plist) so it runs at every login.
+LaunchAgent (~/Library/LaunchAgents/eu.shhshm.PortPilot.agent.plist) so it runs at every login.
 
   --no-build   install the existing dist/PortPilot.app instead of building first
   -h, --help   show this help
@@ -36,8 +36,8 @@ done
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 readonly APP_NAME="PortPilot"
-readonly BUNDLE_ID="app.portpilot.PortPilot"
-readonly LABEL="app.portpilot.agent"
+readonly BUNDLE_ID="eu.shhshm.PortPilot"
+readonly LABEL="eu.shhshm.PortPilot.agent"
 readonly DOMAIN="gui/$UID"
 readonly DIST_APP="$ROOT/dist/$APP_NAME.app"
 readonly INSTALL_DIR="$HOME/Applications"
@@ -103,8 +103,10 @@ stop_portpilot() {
 
 # --- LaunchAgent -------------------------------------------------------------------------------
 
-# Writes the agent plist in exactly the format LoginItemManager uses, so the app recognises it
-# as "Launch at login: on". Built with plutil so paths never need XML escaping.
+# Writes the agent plist with exactly the keys and values LoginItemManager.plistContents uses, so the app
+# recognises it as "Launch at login: on" and never rewrites it on first launch (a rewrite re-registers the
+# agent with macOS). Built with plutil so paths never need XML escaping. A unit test
+# (testInstallScriptWritesTheSamePlistAsLoginItemManager) runs this function and compares the result.
 write_agent_plist() {
     mkdir -p "$AGENT_DIR" "$LOG_DIR"
     tmp_plist="$(mktemp "$AGENT_DIR/.$LABEL.plist.XXXXXX")"
@@ -119,6 +121,9 @@ write_agent_plist() {
     plutil -insert LimitLoadToSessionType -string Aqua "$tmp_plist"
     plutil -insert StandardOutPath -string "$LOG_FILE" "$tmp_plist"
     plutil -insert StandardErrorPath -string "$LOG_FILE" "$tmp_plist"
+    # Lets System Settings > Login Items show the agent as PortPilot instead of a bare executable.
+    plutil -insert AssociatedBundleIdentifiers -array "$tmp_plist"
+    plutil -insert AssociatedBundleIdentifiers -string "$BUNDLE_ID" -append "$tmp_plist"
     plutil -lint -s "$tmp_plist" >/dev/null || die "generated LaunchAgent plist failed plutil -lint"
     chmod 644 "$tmp_plist"
     mv -f "$tmp_plist" "$AGENT_PLIST"

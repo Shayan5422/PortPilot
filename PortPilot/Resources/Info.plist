@@ -33,7 +33,17 @@
 	<key>NSSupportsAutomaticTermination</key>
 	<false/>
 	<key>NSHumanReadableCopyright</key>
-	<string>© 2026 PortPilot. Built for Shayan.</string>
+	<string>© 2026 Shayan Hashemi. MIT License.</string>
+	<key>NSDownloadsFolderUsageDescription</key>
+	<string>PortPilot reads project files such as package.json and .git to show which project each server comes from. It never changes your files.</string>
+	<key>NSDocumentsFolderUsageDescription</key>
+	<string>PortPilot reads project files such as package.json and .git to show which project each server comes from. It never changes your files.</string>
+	<key>NSDesktopFolderUsageDescription</key>
+	<string>PortPilot reads project files such as package.json and .git to show which project each server comes from. It never changes your files.</string>
+	<key>NSRemovableVolumesUsageDescription</key>
+	<string>PortPilot reads project files such as package.json and .git to show which project each server comes from. It never changes your files.</string>
+	<key>NSNetworkVolumesUsageDescription</key>
+	<string>PortPilot reads project files such as package.json and .git to show which project each server comes from. It never changes your files.</string>
 	<key>NSAppleEventsUsageDescription</key>
 	<string>PortPilot uses AppleScript (osascript) only when you choose to stop a process owned by another user, so macOS can ask for your administrator password.</string>
 </dict>

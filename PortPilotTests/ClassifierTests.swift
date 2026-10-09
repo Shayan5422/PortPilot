@@ -152,6 +152,26 @@ final class ClassifierTests: XCTestCase {
                        LaunchOrigin(kind: .ide, name: "VS Code"))
     }
 
+    /// Apple's /usr/bin/make execs Xcode's gnumake: a dev server started by `make` in Terminal is not from Xcode.
+    func testXcodeToolchainAncestorIsNotTheXcodeIDE() {
+        let terminal = ClassifierFixture(pid: 90, executable: "/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal")
+        let zsh = ClassifierFixture(pid: 91, ppid: 90, executable: "/bin/zsh", arguments: ["-zsh"])
+        let make = ClassifierFixture(pid: 92, ppid: 91, comm: "gnumake",
+                                     executable: "/Applications/Xcode.app/Contents/Developer/usr/bin/gnumake",
+                                     arguments: ["make", "dev"])
+        let lookup = [terminal, zsh, make].reduce(into: [Int32: ProcessDetails]()) { $0[$1.basic.pid] = $1.details }
+        XCTAssertEqual(Classifier.origin(details: nil, ancestors: [make.basic, zsh.basic, terminal.basic],
+                                         ancestorDetails: { lookup[$0] }, launchdLabel: nil),
+                       LaunchOrigin(kind: .terminal, name: "Terminal"))
+        XCTAssertNil(Classifier.origin(details: nil, ancestors: [make.basic], ancestorDetails: { lookup[$0] },
+                                       launchdLabel: nil))
+
+        let xcode = ClassifierFixture(pid: 93, executable: "/Applications/Xcode.app/Contents/MacOS/Xcode")
+        XCTAssertEqual(Classifier.origin(details: nil, ancestors: [xcode.basic],
+                                         ancestorDetails: { $0 == 93 ? xcode.details : nil }, launchdLabel: nil),
+                       LaunchOrigin(kind: .ide, name: "Xcode"), "the IDE itself is still Xcode")
+    }
+
     func testOriginFromEnvironmentWhenReparented() {
         let launchd = ProcessBasic(pid: 1, ppid: 0, pgid: 1, uid: 0, comm: "launchd", startTime: 0)
         func origin(_ environment: [String: String]) -> LaunchOrigin? {
@@ -284,5 +304,154 @@ final class ClassifierTests: XCTestCase {
         let interactive = ClassifierFixture(pid: 32, executable: "/bin/zsh", arguments: ["-zsh"])
         XCTAssertTrue(Classifier.isScriptShell(basic: script.basic, details: script.details))
         XCTAssertFalse(Classifier.isScriptShell(basic: interactive.basic, details: interactive.details))
+    }
+
+    // MARK: Coding agents (finding #2, defence in depth)
+
+    private let node = "/opt/homebrew/Cellar/node/25.4.0/bin/node"
+    private let uvPython = "/Users/test/.local/share/uv/python/cpython-3.12.8-macos-aarch64-none/bin/python3.12"
+
+    func testCodingAgentsAndAgentHostsAreBoundaries() {
+        let agents: [(comm: String?, executable: String, arguments: [String], origin: String)] = [
+            ("kimi", "/Users/test/.kimi-code/bin/kimi", ["kimi"], "Kimi"),
+            (nil, node, ["node", "/opt/homebrew/bin/qwen"], "Qwen Code"),
+            (nil, node, ["node", "/opt/homebrew/lib/node_modules/@qwen-code/qwen-code/cli.js", "--yolo"], "Qwen Code"),
+            (nil, node, ["/opt/homebrew/opt/node/bin/node", "--max-old-space-size=8192",
+                         "/opt/homebrew/Cellar/gemini-cli/0.25.2/bin/gemini"], "Gemini CLI"),
+            (nil, node, ["node", "/Users/test/.npm-global/lib/node_modules/@google/gemini-cli/dist/index.js"], "Gemini CLI"),
+            (nil, node, ["node", "/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/cli.js"], "Claude Code"),
+            (nil, node, ["node", "/Users/test/.claude/local/node_modules/.bin/claude"], "Claude Code"),
+            ("2.1.0", "/Users/test/.local/share/claude/versions/2.1.0", ["claude"], "Claude Code"),
+            (nil, node, ["claude", "", ""], "Claude Code"),   // node-installed Claude Code renames its process
+            (nil, node, ["node", "/opt/homebrew/lib/node_modules/@openai/codex/bin/codex.js"], "Codex"),
+            ("codex", "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+             ["codex", "app-server", "--listen", "stdio://"], "Codex"),
+            (nil, node, ["node", "/opt/homebrew/lib/node_modules/opencode-ai/bin/opencode"], "opencode"),
+            ("crush", "/opt/homebrew/bin/crush", ["crush"], "Crush"),
+            ("goose", "/Users/test/.local/bin/goose", ["goose", "session"], "Goose"),
+            (nil, node, ["node", "/opt/homebrew/bin/amp"], "Amp"),
+            (nil, node, ["/Users/test/.local/share/cursor-agent/versions/2025.10/node",
+                         "/Users/test/.local/share/cursor-agent/versions/2025.10/index.js"], "Cursor Agent"),
+            (nil, node, ["node", "/opt/homebrew/lib/node_modules/@github/copilot/index.js"], "Copilot CLI"),
+            ("droid", "/Users/test/.local/bin/droid", ["droid"], "Droid"),
+            (nil, node, ["node", "/opt/homebrew/bin/cline"], "Cline"),
+            (nil, node, ["node", "/opt/homebrew/bin/cn"], "Continue"),
+            (nil, node, ["node", "/opt/homebrew/lib/node_modules/@kilocode/cli/dist/index.js"], "Kilo Code"),
+            (nil, node, ["node", "/opt/homebrew/lib/node_modules/@augmentcode/auggie/augment.mjs"], "Auggie"),
+            (nil, node, ["node", "/opt/homebrew/lib/node_modules/openclaw/openclaw.mjs", "gateway"], "OpenClaw"),
+            ("plandex", "/usr/local/bin/plandex", ["plandex", "tell"], "Plandex"),
+            (nil, uvPython, ["/Users/test/.local/share/uv/tools/aider-chat/bin/python", "/Users/test/.local/bin/aider"], "Aider"),
+            (nil, uvPython, ["python3", "-m", "aider", "--model", "x"], "Aider"),
+            (nil, uvPython, ["python3", "/Users/test/.local/bin/interpreter"], "Open Interpreter"),
+            (nil, uvPython, ["python3", "/Users/test/.local/bin/openhands"], "OpenHands"),
+        ]
+        for agent in agents {
+            let fixture = ClassifierFixture(pid: 40, comm: agent.comm, executable: agent.executable,
+                                            arguments: agent.arguments, cwd: "/Users/test/code/app")
+            XCTAssertTrue(Classifier.isBoundaryProcess(basic: fixture.basic, details: fixture.details), "\(agent.arguments)")
+            // The same detection names the launch origin of anything the agent starts.
+            let server = ClassifierFixture(pid: 41, ppid: 40, executable: node, arguments: ["node", "server.js"])
+            let origin = Classifier.origin(details: server.details, ancestors: [fixture.basic],
+                                           ancestorDetails: { $0 == 40 ? fixture.details : nil }, launchdLabel: nil)
+            XCTAssertEqual(origin?.name, agent.origin, "\(agent.arguments)")
+        }
+    }
+
+    func testPlainDevServersAreNeverMistakenForAgents() {
+        let servers: [(executable: String, arguments: [String])] = [
+            (node, ["node", "/Users/test/code/claude-code-dashboard/server.js"]),
+            (node, ["node", "/Users/test/code/opencode-site/index.js"]),
+            (node, ["node", "/Users/test/code/goose/server.js"]),
+            (node, ["node", "/Users/test/code/gemini-app/node_modules/.bin/vite"]),
+            (node, ["node", "/Users/test/code/qwen-ui/node_modules/next/dist/bin/next", "dev"]),
+            (node, ["node", "/Users/test/code/app/bin/www"]),
+            (node, ["node", "/Users/test/code/app/amp.js"]),
+            (node, ["node", "--watch", "server.js"]),
+            (node, ["next-server (v15.0.3)", "", ""]),
+            (uvPython, ["python3", "/Users/test/code/aider-ui/app.py"]),
+            (uvPython, ["python3", "-m", "uvicorn", "kimi.main:app"]),
+            ("/Users/test/code/amp/target/debug/amp-server", ["./target/debug/amp-server"]),
+            ("/opt/homebrew/bin/cloudflared", ["cloudflared", "tunnel", "run"]),
+        ]
+        for server in servers {
+            let fixture = ClassifierFixture(pid: 50, executable: server.executable, arguments: server.arguments,
+                                            cwd: "/Users/test/code/app")
+            XCTAssertFalse(Classifier.isBoundaryProcess(basic: fixture.basic, details: fixture.details),
+                           "\(server.arguments)")
+        }
+    }
+
+    // MARK: Watchers and package managers as plan anchors (findings #2, #5)
+
+    func testWatcherProcessPredicate() {
+        func isWatcher(_ executable: String, _ arguments: [String], environment: [String: String] = [:]) -> Bool {
+            let fixture = ClassifierFixture(pid: 60, executable: executable, arguments: arguments, environment: environment)
+            return Classifier.isWatcherProcess(basic: fixture.basic, details: fixture.details)
+        }
+        XCTAssertTrue(isWatcher(node, ["node", "--watch", "server.js"]))
+        XCTAssertTrue(isWatcher(node, ["node", "/p/node_modules/nodemon/bin/nodemon.js", "server.js"]))
+        XCTAssertTrue(isWatcher(pythonFramework, ["Python", "-m", "uvicorn", "main:app", "--reload"]))
+        XCTAssertTrue(isWatcher(pythonFramework, ["python", "/opt/homebrew/bin/uvicorn", "main:app", "--reload"]))
+        XCTAssertTrue(isWatcher(pythonFramework, ["python", "-m", "flask", "run", "--debug"]))
+        XCTAssertTrue(isWatcher(pythonFramework, ["python", "manage.py", "runserver"]))
+        XCTAssertTrue(isWatcher("/Users/test/.bun/bin/bun", ["bun", "--hot", "server.ts"]))
+        XCTAssertTrue(isWatcher("/Users/test/.cargo/bin/cargo", ["cargo", "watch", "-x", "run"]))
+        XCTAssertFalse(isWatcher(node, ["node", "server.js"]))
+        XCTAssertFalse(isWatcher(pythonFramework, ["python", "-m", "uvicorn", "main:app"]))
+        XCTAssertFalse(isWatcher(pythonFramework, ["python", "manage.py", "runserver", "--noreload"]))
+        // supervisord runs many programs: stopping one of them must never take the supervisor down.
+        XCTAssertFalse(isWatcher(pythonFramework, ["python", "/opt/homebrew/bin/supervisord", "-c", "/etc/supervisord.conf"]))
+        XCTAssertFalse(isWatcher("/opt/homebrew/bin/supervisord", ["supervisord", "-n"]))
+        let supervisor = ClassifierFixture(pid: 62, executable: "/opt/homebrew/bin/supervisord", arguments: ["supervisord", "-n"])
+        XCTAssertEqual(Classifier.watcherName(for: supervisor.basic, details: supervisor.details, ancestors: [],
+                                              ancestorDetails: { _ in nil }), "supervisord",
+                       "still shown as the program's supervisor, just never a plan root")
+        // The reloaded Flask child carries WERKZEUG_RUN_MAIN; it is the server, not the watcher.
+        XCTAssertFalse(isWatcher(pythonFramework, ["python", "app.py"], environment: ["WERKZEUG_RUN_MAIN": "true"]))
+        let unreadable = ClassifierFixture(pid: 61, comm: "node", executable: nil, readable: false)
+        XCTAssertFalse(Classifier.isWatcherProcess(basic: unreadable.basic, details: nil))
+    }
+
+    func testPackageManagersAreRunnersInEveryForm() {
+        func isRunner(_ arguments: [String], executable: String? = nil) -> Bool {
+            let fixture = ClassifierFixture(pid: 70, comm: "node", executable: executable ?? node, arguments: arguments)
+            return Classifier.isRunnerProcess(basic: fixture.basic, details: fixture.details)
+        }
+        XCTAssertTrue(isRunner(["npm run dev", "", "", ""]), "npm's process title")
+        XCTAssertTrue(isRunner(["npm exec next start", "", ""]))
+        XCTAssertTrue(isRunner(["node", "/opt/homebrew/bin/npm", "run", "dev"]))
+        XCTAssertTrue(isRunner(["node", "/opt/homebrew/bin/pnpm", "dev"]))
+        XCTAssertTrue(isRunner(["node", "/opt/homebrew/bin/yarn", "dev"]))
+        XCTAssertTrue(isRunner(["node", "/Users/test/code/app/.yarn/releases/yarn-4.5.0.cjs", "dev"]))
+        XCTAssertFalse(isRunner(["next-server (v15.0.3)", "", ""]))
+        XCTAssertFalse(isRunner(["nginx: master process /opt/homebrew/bin/nginx", ""], executable: "/opt/homebrew/bin/nginx"))
+        XCTAssertFalse(isRunner(["node", "/Users/test/code/app/npm.js"]), "a project's own npm.js is not npm")
+        XCTAssertTrue(Classifier.isPackageManagerScript("/opt/homebrew/lib/node_modules/npm/bin/npm-cli.js"))
+        XCTAssertFalse(Classifier.isPackageManagerScript("server.js"))
+        // Corepack loads the real package manager inside its own entry script.
+        XCTAssertTrue(isRunner(["node", "/opt/homebrew/lib/node_modules/corepack/dist/pnpm.js", "dev"]))
+        XCTAssertTrue(isRunner(["node", "/Users/test/.volta/tools/image/corepack/0.31.0/dist/yarn.js", "dev"]))
+        XCTAssertFalse(Classifier.isPackageManagerScript("/Users/test/code/app/scripts/pnpm.js"))
+    }
+
+    func testOtherRunnersInTheirRealForms() {
+        func isRunner(_ executable: String, _ arguments: [String]) -> Bool {
+            let fixture = ClassifierFixture(pid: 71, executable: executable, arguments: arguments)
+            return Classifier.isRunnerProcess(basic: fixture.basic, details: fixture.details)
+        }
+        // Apple's /usr/bin/make execs Xcode's (or the Command Line Tools') gnumake, keeping argv[0].
+        XCTAssertTrue(isRunner("/Applications/Xcode.app/Contents/Developer/usr/bin/gnumake",
+                               ["/Applications/Xcode.app/Contents/Developer/usr/bin/make", "-s", "dev"]))
+        XCTAssertTrue(isRunner("/Library/Developer/CommandLineTools/usr/bin/gnumake", ["make", "dev"]))
+        // `bun dev` runs a package.json script; `bun server.ts` and `bun install` don't.
+        let bun = "/Users/test/.bun/bin/bun"
+        XCTAssertTrue(isRunner(bun, ["bun", "dev"]))
+        XCTAssertTrue(isRunner(bun, ["bun", "run", "dev"]))
+        XCTAssertTrue(isRunner(bun, ["bun", "--bun", "dev"]))
+        XCTAssertFalse(isRunner(bun, ["bun", "server.ts"]))
+        XCTAssertFalse(isRunner(bun, ["bun", "--hot", "./src/index.ts"]))
+        XCTAssertFalse(isRunner(bun, ["bun", "install"]))
+        XCTAssertFalse(isRunner(bun, ["bun", "test"]))
+        XCTAssertFalse(isRunner("/opt/homebrew/bin/node", ["node", "server.js"]))
     }
 }

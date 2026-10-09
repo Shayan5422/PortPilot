@@ -52,15 +52,19 @@ private struct StoppedRecordRow: View {
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .truncationMode(.tail)
-                    HStack(spacing: 3) {
-                        ForEach(record.ports, id: \.self) { port in
-                            Text(verbatim: ":\(port)")
-                                .font(.system(size: 10.5, weight: .semibold).monospacedDigit())
-                                .foregroundStyle(.tertiary)
-                                .strikethrough(true, color: .secondary.opacity(0.6))
-                        }
+                        .layoutPriority(1) // never squeezed away by the ports
+                    CappedPortChips(ports: record.ports, spacing: 3) { port in
+                        Text(verbatim: ":\(port)")
+                            .font(.system(size: 10.5, weight: .semibold).monospacedDigit())
+                            .foregroundStyle(.tertiary)
+                            .strikethrough(true, color: .secondary.opacity(0.6))
+                    } overflow: { hidden in
+                        Text(verbatim: "+\(hidden.count)")
+                            .font(.system(size: 10.5, weight: .semibold).monospacedDigit())
+                            .foregroundStyle(.tertiary)
+                            .help("Was also on " + PortChipOverflow.list(hidden))
                     }
-                    .fixedSize()
+                    .accessibilityElement(children: .ignore)
                     .accessibilityLabel("Was on port \(record.ports.map { String($0) }.joined(separator: ", "))")
                     Spacer(minLength: 6)
                     TimeAgoText(date: record.date, interval: 15)
@@ -70,7 +74,7 @@ private struct StoppedRecordRow: View {
                 }
                 Text(record.commandLine.isEmpty ? "Command unavailable" : DisplayText.command(record.commandLine))
                     .font(.command)
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(.tertiary) // dimmed on purpose: the row is something that no longer runs
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .help(record.commandLine)
@@ -79,7 +83,13 @@ private struct StoppedRecordRow: View {
             .padding(.trailing, 6)
 
             HStack(spacing: 0) {
-                if record.canRelaunch {
+                if store.relaunchingRecordIDs.contains(record.id) {
+                    ProgressView()
+                        .controlSize(.small)
+                        .scaleEffect(0.75)
+                        .frame(width: 22, height: 22)
+                        .accessibilityLabel("Relaunching \(record.title)")
+                } else if StopReport.canRelaunch(record) {
                     Button {
                         store.relaunch(record)
                     } label: {
@@ -124,7 +134,10 @@ private struct StoppedRecordRow: View {
         case .launchd(let job): return "Managed by launchd — turn it back on under Startup Items (\(job.label))."
         case .pm2(_, let name): return "Managed by pm2 — restart it with “pm2 restart \(name)”."
         case .docker(let container): return "Docker container — restart it with “docker start \(container.name)”."
-        case .none, .watcher: return record.arguments.isEmpty ? "The original command could not be read." : nil
+        case .none, .watcher:
+            if record.arguments.isEmpty { return "The original command could not be read." }
+            return StopReport.canRelaunch(record) ? nil
+                : "It renamed itself while running, so its original command is unknown. Start it the way you usually do."
         }
     }
 }

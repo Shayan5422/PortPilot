@@ -23,7 +23,7 @@ final class Notifier {
     private let categories: Set<ListenerCategory>
     private let now: () -> Date
     private let lock = NSLock()
-    private let logger = Logger(subsystem: "app.portpilot", category: "Notifier")
+    private let logger = Logger(subsystem: "eu.shhshm.PortPilot", category: "Notifier")
     private let presenter = ForegroundPresenter()
 
     // Guarded by `lock`.

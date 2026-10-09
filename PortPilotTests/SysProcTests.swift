@@ -140,6 +140,41 @@ final class SysProcTests: XCTestCase {
                       "expected [::1]:\(listener.port) in \(sockets)")
     }
 
+    /// Java NIO (Gradle, Spring, Netty, JetBrains) binds "127.0.0.1" through an AF_INET6 socket as ::ffff:127.0.0.1.
+    /// The kernel turns that into a plain IPv4 PCB; it must be reported as loopback IPv4, not as exposed "::127.0.0.1".
+    func testIPv4AddressOnIPv6SocketIsReportedAsIPv4() throws {
+        let listener: TestListener
+        do {
+            listener = try TestListener(family: AF_INET6, address: "::ffff:127.0.0.1", v6Only: false)
+        } catch {
+            throw XCTSkip("v4-mapped bind unavailable: \(error)")
+        }
+        defer { listener.close() }
+
+        let sockets = try XCTUnwrap(SysProc.listeningTCPSockets(pid: getpid()))
+        let ours = try XCTUnwrap(sockets.first { $0.port == listener.port }, "\(sockets)")
+        XCTAssertEqual(ours, ListeningSocket(port: listener.port, address: "127.0.0.1", family: .ipv4, pid: getpid()))
+        XCTAssertTrue(ours.isLoopbackOnly)
+        XCTAssertFalse(ours.isExposed)
+
+        if let all = SysProc.systemTCPListeners() {
+            XCTAssertTrue(all.contains(ours), "the kernel PCB list must agree with libproc: \(all.filter { $0.pid == getpid() })")
+        }
+    }
+
+    func testDualStackWildcardSocketStaysIPv6() throws {
+        let listener: TestListener
+        do {
+            listener = try TestListener(family: AF_INET6, address: "::", v6Only: false)
+        } catch {
+            throw XCTSkip("IPv6 unavailable: \(error)")
+        }
+        defer { listener.close() }
+        let sockets = try XCTUnwrap(SysProc.listeningTCPSockets(pid: getpid()))
+        XCTAssertTrue(sockets.contains(ListeningSocket(port: listener.port, address: "*", family: .ipv6, pid: getpid())),
+                      "\(sockets)")
+    }
+
     func testClosedSocketIsNoLongerReported() throws {
         let listener = try TestListener(family: AF_INET, address: "127.0.0.1")
         let port = listener.port
@@ -182,6 +217,82 @@ final class SysProcTests: XCTestCase {
         ])
     }
 
+    func testParsePCBListUsesVersionFlagForIPv4OnIPv6Sockets() throws {
+        let in4in6Loopback = Array(repeating: UInt8(0), count: 12) + [127, 0, 0, 1]
+        var list = PCBListBuilder()
+        // AF_INET6 socket bound to ::ffff:127.0.0.1: IPv4-only PCB (vflag 1), address stored as in4in6.
+        list.append(port: 60237, family: AF_INET6, ipv6: in4in6Loopback, vflag: 0x1, pid: 16913, state: 1)
+        // ::ffff:0.0.0.0 → IPv4 wildcard.
+        list.append(port: 60238, family: AF_INET6, ipv6: Array(repeating: 0, count: 16), vflag: 0x1, pid: 16914, state: 1)
+        // Dual-stack "::" (both flags) stays IPv6.
+        list.append(port: 60239, family: AF_INET6, ipv6: Array(repeating: 0, count: 16), vflag: 0x3, pid: 16915, state: 1)
+        // A real v4-mapped address on a dual-stack PCB still decodes as IPv4.
+        list.append(port: 60240, family: AF_INET6, ipv6: Array(repeating: 0, count: 10) + [0xff, 0xff, 10, 0, 0, 7],
+                    vflag: 0x3, pid: 16916, state: 1)
+        let bytes = list.finish()
+
+        let sockets = try XCTUnwrap(bytes.withUnsafeBytes { SysProc.parsePCBList($0) })
+        XCTAssertEqual(sockets, [
+            ListeningSocket(port: 60237, address: "127.0.0.1", family: .ipv4, pid: 16913),
+            ListeningSocket(port: 60238, address: "*", family: .ipv4, pid: 16914),
+            ListeningSocket(port: 60239, address: "*", family: .ipv6, pid: 16915),
+            ListeningSocket(port: 60240, address: "10.0.0.7", family: .ipv4, pid: 16916),
+        ])
+        XCTAssertTrue(sockets[0].isLoopbackOnly)
+    }
+
+    // MARK: - Descriptor listing
+
+    func testDescriptorListingUsesLastFillDuringAnFDStorm() throws {
+        let entrySize = MemoryLayout<proc_fdinfo>.stride
+        var buffer: [proc_fdinfo] = []
+        var listCalls = 0
+        var tableSize = 8
+        // Every call fills the buffer completely with socket descriptors and the table keeps growing.
+        let count = SysProc.listFileDescriptors(
+            into: &buffer,
+            list: { raw in
+                listCalls += 1
+                let entries = raw.bindMemory(to: proc_fdinfo.self)
+                for index in entries.indices {
+                    entries[index] = proc_fdinfo(proc_fd: Int32(index), proc_fdtype: UInt32(PROX_FDTYPE_SOCKET))
+                }
+                return Int32(entries.count * entrySize)
+            },
+            probe: {
+                tableSize = tableSize * 3 + 100   // outgrows every regrow
+                return tableSize * entrySize
+            })
+        let filled = try XCTUnwrap(count)
+        XCTAssertEqual(listCalls, SysProc.maxDescriptorListAttempts)
+        XCTAssertEqual(filled, buffer.count, "the last fill is used as is (truncated), never a freshly grown empty buffer")
+        XCTAssertTrue(buffer.prefix(filled).allSatisfy { $0.proc_fdtype == UInt32(PROX_FDTYPE_SOCKET) },
+                      "every reported entry must hold data written by the kernel")
+        XCTAssertEqual(buffer[filled - 1].proc_fd, Int32(filled - 1))
+    }
+
+    func testDescriptorListingGrowsOnceAndReportsErrors() {
+        let entrySize = MemoryLayout<proc_fdinfo>.stride
+        var buffer = [proc_fdinfo](repeating: proc_fdinfo(), count: 4)
+        var table = 10   // more descriptors than the buffer holds: one regrow, then complete
+        let count = SysProc.listFileDescriptors(
+            into: &buffer,
+            list: { raw in
+                let capacity = raw.count / entrySize
+                return Int32(min(table, capacity) * entrySize)
+            },
+            probe: { (table + 20) * entrySize })
+        XCTAssertEqual(count, 10)
+        XCTAssertGreaterThan(buffer.count, 10)
+
+        table = 0
+        XCTAssertEqual(SysProc.listFileDescriptors(into: &buffer, list: { _ in 0 }, probe: { 0 }), 0, "no descriptors")
+        XCTAssertNil(SysProc.listFileDescriptors(into: &buffer, list: { _ in errno = ESRCH; return 0 }, probe: { nil }),
+                     "an error is 'cannot inspect', not 'no sockets'")
+        var empty: [proc_fdinfo] = []
+        XCTAssertNil(SysProc.listFileDescriptors(into: &empty, list: { _ in 0 }, probe: { nil }))
+    }
+
     func testParsePCBListRejectsMalformedInput() {
         XCTAssertNil([UInt8]().withUnsafeBytes { SysProc.parsePCBList($0) })
         XCTAssertNil(PCBListBuilder().finish().withUnsafeBytes { SysProc.parsePCBList($0) },
@@ -221,7 +332,7 @@ final class SysProcTests: XCTestCase {
         let output = """
         Active Internet connections (including servers)
         Proto Recv-Q Send-Q  Local Address          Foreign Address        (state)          rxbytes      txbytes  rhiwat  shiwat          process:pid    state  options           gencnt    flags   flags1 usecnt rtncnt fltrs
-        tcp4       0      0  192.168.1.81.52082     34.98.110.65.443       ESTABLISHED        11162          713  131072  131600 com.avast.daemon:1050   00182 00000000 000000000082295c 20000081 04000900      3      0 000004
+        tcp4       0      0  192.0.2.10.52082       203.0.113.7.443        ESTABLISHED        11162          713  131072  131600 com.avast.daemon:1050   00182 00000000 000000000082295c 20000081 04000900      3      0 000004
         tcp4       0      0  127.0.0.1.51790        *.*                    LISTEN                 0            0  131072  131072 Code Helper (Plu:82075  00100 00000106 000000000081822a 00000001 00000800      1      0 000000
         tcp4       0      0  *.57621                *.*                    LISTEN                 0            0  131072  131072          Spotify:17080  00100 00000002 00000000007a9ece 00000000 00000800      1      0 000000
         tcp4       0      0  127.0.0.1.8831         *.*                    LISTEN                 0            0  131072  131072 Antigravity IDE :86033  00100 00000106 000000000079a662 00000001 00000800      1      0 000000
@@ -364,10 +475,17 @@ private final class TestListener {
     let port: UInt16
     private var fd: Int32
 
-    init(family: Int32, address: String) throws {
+    /// - Parameter v6Only: sets IPV6_V6ONLY on an AF_INET6 socket before binding (nil keeps the system default).
+    init(family: Int32, address: String, v6Only: Bool? = nil) throws {
         let fd = socket(family, SOCK_STREAM, IPPROTO_TCP)
         guard fd >= 0 else { throw SocketError(call: "socket", code: errno) }
         do {
+            if family == AF_INET6, let v6Only {
+                var flag: Int32 = v6Only ? 1 : 0
+                guard setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &flag, socklen_t(MemoryLayout<Int32>.size)) == 0 else {
+                    throw SocketError(call: "setsockopt", code: errno)
+                }
+            }
             port = try Self.bindAndListen(fd: fd, family: family, address: address)
         } catch {
             Darwin.close(fd)
@@ -437,11 +555,12 @@ private struct PCBListBuilder {
         bytes = Self.generationHeader(count: 0)
     }
 
-    mutating func append(port: UInt16, family: Int32, ipv4: [UInt8] = [], ipv6: [UInt8] = [],
+    /// - Parameter vflag: inp_vflag (INP_IPV4 0x1, INP_IPV6 0x2); defaults to the family's usual value.
+    mutating func append(port: UInt16, family: Int32, ipv4: [UInt8] = [], ipv6: [UInt8] = [], vflag: UInt8? = nil,
                          pid: Int32, state: Int32) {
         var inpcb = Self.record(kind: 0x10, length: 104)
         Self.write(port.bigEndian, at: 18, in: &inpcb)
-        inpcb[44] = family == AF_INET6 ? 0x2 : 0x1
+        inpcb[44] = vflag ?? (family == AF_INET6 ? 0x2 : 0x1)
         if family == AF_INET6 {
             inpcb.replaceSubrange(64..<80, with: ipv6)
         } else {

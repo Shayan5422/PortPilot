@@ -10,7 +10,7 @@ usage() {
     cat <<'EOF'
 Usage: scripts/uninstall.sh [-y|--yes] [--purge]
 
-Stops PortPilot, removes its LaunchAgent (~/Library/LaunchAgents/app.portpilot.agent.plist)
+Stops PortPilot, removes its LaunchAgent (~/Library/LaunchAgents/eu.shhshm.PortPilot.agent.plist)
 and deletes ~/Applications/PortPilot.app.
 
   -y, --yes    do not ask for confirmation
@@ -37,8 +37,8 @@ done
 [[ -n "${HOME:-}" && -d "$HOME" ]] || die "HOME is not set to an existing directory"
 
 readonly APP_NAME="PortPilot"
-readonly BUNDLE_ID="app.portpilot.PortPilot"
-readonly LABEL="app.portpilot.agent"
+readonly BUNDLE_ID="eu.shhshm.PortPilot"
+readonly LABEL="eu.shhshm.PortPilot.agent"
 readonly DOMAIN="gui/$UID"
 readonly INSTALLED_APP="$HOME/Applications/$APP_NAME.app"
 readonly AGENT_PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"

@@ -1,49 +1,67 @@
 import AppKit
 import SwiftUI
 
-/// The menu bar panel: header, search, banner, sectioned list (or Settings in place), footer.
+/// The menu bar panel: header, search, sectioned list (or Settings in place), footer, and a banner that floats
+/// over the bottom of the list.
+///
+/// MenuBarExtra keeps this view alive while the panel is closed (even before it is first opened). So while the
+/// panel is hidden the list (or Settings) is replaced by an empty frame of the same height and the header clock
+/// stops ticking: nothing heavy stays in the view graph, and no scan or clock tick re-lays out a window nobody
+/// sees. The list is rebuilt the moment the panel opens (`WindowVisibilityReader` reports it on key, before the
+/// first frame).
 ///
 /// `snapshotMode` renders the full height without a ScrollView, with an opaque background and without
-/// window observers, so `SnapshotRenderer` can draw it offscreen.
+/// window observers, so `SnapshotRenderer` can draw it offscreen; it always renders the list.
 struct PanelView: View {
     @Bindable var store: AppStore
     let snapshotMode: Bool
 
     @State private var showingSettings: Bool
+    /// About, shown over the list or Settings (Done returns to whichever was showing).
+    @State private var showingAbout: Bool
     @State private var listContentHeight: CGFloat = 320
+    @State private var bannerHeight: CGFloat = 0
+    @State private var bannerHold = BannerHold()
+    @State private var bannerReleaseTask: Task<Void, Never>?
     @FocusState private var isSearchFocused: Bool
     /// Comma-separated keys of collapsed sections (category raw values, "startup", "stopped").
     @AppStorage("PortPilot.collapsedSections") private var collapsedSectionsStorage = "startup"
 
-    init(store: AppStore, snapshotMode: Bool = false, initiallyShowingSettings: Bool = false) {
+    init(store: AppStore, snapshotMode: Bool = false, initiallyShowingSettings: Bool = false,
+         initiallyShowingAbout: Bool = false) {
         self.store = store
         self.snapshotMode = snapshotMode
         _showingSettings = State(initialValue: initiallyShowingSettings)
+        _showingAbout = State(initialValue: initiallyShowingAbout)
     }
+
+    /// True when the list should exist: on screen, or rendering a snapshot.
+    private var isLive: Bool { snapshotMode || store.isPanelVisible }
+    /// AppStore's banner, or the one the pointer is resting on after AppStore auto-dismissed it.
+    private var shownBanner: Banner? { bannerHold.shown(current: store.banner) }
 
     var body: some View {
         VStack(spacing: 0) {
-            PanelHeader(store: store, showingSettings: $showingSettings)
+            PanelHeader(store: store, showingSettings: $showingSettings, showingAbout: $showingAbout,
+                        isOnScreen: store.isPanelVisible && !snapshotMode)
 
-            if showingSettings {
+            if showingAbout {
                 Hairline()
-                scrollable {
-                    SettingsView(store: store) { closeSettings() }
+                panelBody {
+                    AboutView(store: store) { showingAbout = false }
+                }
+            } else if showingSettings {
+                Hairline()
+                panelBody {
+                    SettingsView(store: store, onShowAbout: { showingAbout = true }) { closeSettings() }
                 }
             } else {
                 SearchField(text: $store.searchText, isFocused: $isSearchFocused)
                     .padding(.horizontal, 12)
                     .padding(.bottom, 8)
 
-                if let banner = store.banner {
-                    BannerView(banner: banner, store: store)
-                        .padding(.horizontal, 12)
-                        .padding(.bottom, 8)
-                        .transition(.move(edge: .top).combined(with: .opacity))
-                }
-
                 Hairline()
-                scrollable { listContent }
+                panelBody { listContent }
                 Hairline()
                 PanelFooter(store: store)
             }
@@ -58,8 +76,10 @@ struct PanelView: View {
                 WindowVisibilityReader { visible in panelVisibilityChanged(visible) }
             }
         }
-        .animation(snapshotMode ? nil : .snappy(duration: 0.22), value: store.banner)
+        .animation(snapshotMode ? nil : .snappy(duration: 0.22), value: shownBanner)
         .animation(snapshotMode ? nil : .snappy(duration: 0.2), value: showingSettings)
+        .animation(snapshotMode ? nil : .snappy(duration: 0.2), value: showingAbout)
+        .onChange(of: store.banner) { _, banner in bannerHold.storeBannerChanged(to: banner) }
         .onExitCommand(perform: exitCommand)
         .onAppear {
             // Polling normally starts from the menu bar label at launch; this is an idempotent fallback.
@@ -67,10 +87,31 @@ struct PanelView: View {
         }
     }
 
+    // MARK: Body (list or Settings)
+
+    /// The scrolling list or Settings with the banner floating over its bottom edge, so a banner appearing or
+    /// expiring never moves the rows under the cursor. While the panel is hidden: an empty frame of the same
+    /// height (keeps the window size, so the next opening doesn't jump).
+    @ViewBuilder
+    private func panelBody<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        if isLive {
+            scrollable(content)
+                .overlay(alignment: .bottom) { bannerOverlay }
+                .onPreferenceChange(BannerHeightKey.self) { height in
+                    if abs(height - bannerHeight) > 0.5 { bannerHeight = height }
+                }
+        } else {
+            Color.clear
+                .frame(height: viewportHeight)
+                .accessibilityHidden(true)
+        }
+    }
+
     // MARK: List
 
     private var listContent: some View {
         VStack(alignment: .leading, spacing: 2) {
+            PanelNotices(store: store)
             let sections = store.sections
             if sections.isEmpty {
                 EmptyStateView(searchText: store.searchText, hiddenCount: store.hiddenCount)
@@ -85,16 +126,36 @@ struct PanelView: View {
                     }
                 }
             }
-            if store.searchText.isEmpty && !StartupItemsView.visibleItems(in: store).isEmpty {
-                StartupItemsView(store: store, isCollapsed: collapsedBinding("startup"))
+            // Tools whose ports closed while their processes kept running (collapse key "stillRunning").
+            if store.searchText.isEmpty && !store.stillRunning.isEmpty {
+                StillRunningView(store: store, isCollapsed: collapsedBinding("stillRunning"))
             }
-            if !store.recentlyStopped.isEmpty && store.searchText.isEmpty {
-                RecentlyStoppedView(store: store, isCollapsed: collapsedBinding("stopped"))
+            let trailing = TrailingSection.visible(searchText: store.searchText,
+                                                   hasRecentlyStopped: !store.recentlyStopped.isEmpty,
+                                                   hasStartupItems: !StartupItemsView.visibleItems(in: store).isEmpty)
+            ForEach(trailing, id: \.self) { section in
+                switch section {
+                case .recentlyStopped:
+                    RecentlyStoppedView(store: store, isCollapsed: collapsedBinding("stopped"))
+                case .startupItems:
+                    StartupItemsView(store: store, isCollapsed: collapsedBinding("startup"))
+                }
             }
         }
         .padding(.horizontal, Theme.listInset)
         .padding(.top, 2)
         .padding(.bottom, 8)
+    }
+
+    /// Height of the scrolling area: follows the content, up to `Theme.maxListHeight`.
+    private var viewportHeight: CGFloat {
+        min(max(listContentHeight, 60), Theme.maxListHeight)
+    }
+
+    /// Extra scrollable space under the content while a banner covers the bottom of the list, so the last rows
+    /// can still be scrolled into view.
+    private var bannerInset: CGFloat {
+        shownBanner == nil ? 0 : bannerHeight
     }
 
     /// Wraps content in a ScrollView whose height follows the content up to `Theme.maxListHeight`, so the
@@ -103,6 +164,7 @@ struct PanelView: View {
     private func scrollable<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
         if snapshotMode {
             content()
+                .padding(.bottom, bannerInset)
         } else {
             ScrollView(.vertical) {
                 content()
@@ -113,9 +175,62 @@ struct PanelView: View {
                     }
             }
             .scrollBounceBehavior(.basedOnSize)
-            .frame(height: min(max(listContentHeight, 60), Theme.maxListHeight))
+            .contentMargins(.bottom, bannerInset, for: .scrollContent)
+            .frame(height: viewportHeight)
             .onPreferenceChange(ContentHeightKey.self) { height in
                 if abs(height - listContentHeight) > 0.5 { listContentHeight = height }
+            }
+        }
+    }
+
+    // MARK: Banner
+
+    @ViewBuilder
+    private var bannerOverlay: some View {
+        if let banner = shownBanner {
+            BannerView(banner: banner,
+                       onAction: { performBannerAction(banner) },
+                       onDismiss: dismissBanner)
+                .padding(.horizontal, 10)
+                .padding(.bottom, 8)
+                .background {
+                    GeometryReader { proxy in
+                        Color.clear.preference(key: BannerHeightKey.self, value: proxy.size.height)
+                    }
+                }
+                .onHover(perform: bannerHoverChanged)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+        }
+    }
+
+    private func performBannerAction(_ banner: Banner) {
+        releaseBanner()
+        store.performBannerAction(banner)
+    }
+
+    private func dismissBanner() {
+        releaseBanner()
+        store.dismissBanner()
+    }
+
+    private func releaseBanner() {
+        bannerReleaseTask?.cancel()
+        bannerReleaseTask = nil
+        bannerHold.release()
+    }
+
+    /// Holds the banner while the pointer rests on it; lets it go shortly after the pointer leaves.
+    private func bannerHoverChanged(_ hovering: Bool) {
+        bannerReleaseTask?.cancel()
+        bannerReleaseTask = nil
+        if hovering {
+            bannerHold.pointerEntered(current: store.banner)
+        } else {
+            bannerHold.pointerExited()
+            bannerReleaseTask = Task { @MainActor in
+                try? await Task.sleep(for: .seconds(BannerHold.lingerAfterPointerLeaves))
+                guard !Task.isCancelled else { return }
+                bannerHold.releaseIfPointerOutside()
             }
         }
     }
@@ -148,7 +263,7 @@ struct PanelView: View {
             Button("Refresh") { store.refreshNow() }
                 .keyboardShortcut("r", modifiers: .command)
             Button("Find") {
-                if showingSettings {
+                if showingSettings || showingAbout {
                     closeSettings()
                     // The search field only exists once the list is back on screen; focus it on the next turn.
                     Task { @MainActor in isSearchFocused = true }
@@ -157,7 +272,7 @@ struct PanelView: View {
                 }
             }
             .keyboardShortcut("f", modifiers: .command)
-            Button("Settings") { showingSettings.toggle() }
+            Button("Settings") { PanelPages.toggleSettings(settings: &showingSettings, about: &showingAbout) }
                 .keyboardShortcut(",", modifiers: .command)
             Button("Quit PortPilot") { store.quit() }
                 .keyboardShortcut("q", modifiers: .command)
@@ -170,6 +285,7 @@ struct PanelView: View {
 
     /// Esc: leave Settings, then clear the search; otherwise let the window handle it (closes the panel).
     private var exitCommand: (() -> Void)? {
+        if showingAbout { return { showingAbout = false } }
         if showingSettings { return { closeSettings() } }
         if !store.searchText.isEmpty { return { store.searchText = "" } }
         return nil
@@ -177,17 +293,99 @@ struct PanelView: View {
 
     private func closeSettings() {
         showingSettings = false
+        showingAbout = false
     }
 
     private func panelVisibilityChanged(_ visible: Bool) {
         guard store.isPanelVisible != visible else { return }
+        if !visible { releaseBanner() }
         store.isPanelVisible = visible
         // Fresh numbers the moment the panel opens instead of waiting for the next tick.
         if visible { store.refreshNow() }
     }
 }
 
+/// Which page the panel shows in place of the list. Pure, unit tested.
+enum PanelPages {
+    /// The gear and ⌘,: from About go to Settings; otherwise toggle Settings.
+    static func toggleSettings(settings: inout Bool, about: inout Bool) {
+        if about {
+            about = false
+            settings = true
+        } else {
+            settings.toggle()
+        }
+    }
+}
+
+/// Sections shown below the live groups, in display order. Recently Stopped comes first so Relaunch stays near
+/// the top even when the long Startup Items list is expanded. Both are hidden while searching.
+enum TrailingSection: CaseIterable, Hashable {
+    case recentlyStopped
+    case startupItems
+
+    static func visible(searchText: String, hasRecentlyStopped: Bool, hasStartupItems: Bool) -> [TrailingSection] {
+        guard searchText.isEmpty else { return [] }
+        return allCases.filter { section in
+            switch section {
+            case .recentlyStopped: return hasRecentlyStopped
+            case .startupItems: return hasStartupItems
+            }
+        }
+    }
+}
+
+/// Keeps a banner on screen while the pointer rests on it, even after AppStore's auto-dismiss timer cleared it,
+/// so a message being read (or its button being aimed at) never vanishes under the cursor. Pure, unit tested.
+struct BannerHold: Equatable {
+    /// How long a held banner stays after the pointer leaves it.
+    static let lingerAfterPointerLeaves: Double = 1.5
+
+    private(set) var held: Banner?
+    private(set) var isPointerInside = false
+
+    /// AppStore's banner wins; the held one only fills in once AppStore has cleared its own.
+    func shown(current: Banner?) -> Banner? {
+        current ?? held
+    }
+
+    mutating func pointerEntered(current: Banner?) {
+        isPointerInside = true
+        if let current { held = current }
+    }
+
+    mutating func pointerExited() {
+        isPointerInside = false
+    }
+
+    /// A newer banner replaces the held one; a cleared banner stays held only while the pointer is on it.
+    mutating func storeBannerChanged(to current: Banner?) {
+        if let current {
+            held = isPointerInside ? current : nil
+        } else if !isPointerInside {
+            held = nil
+        }
+    }
+
+    mutating func releaseIfPointerOutside() {
+        if !isPointerInside { held = nil }
+    }
+
+    /// Closed or acted on: let go immediately.
+    mutating func release() {
+        held = nil
+        isPointerInside = false
+    }
+}
+
 private struct ContentHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+private struct BannerHeightKey: PreferenceKey {
     static let defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
         value = max(value, nextValue())
@@ -208,21 +406,28 @@ private struct Hairline: View {
 private struct PanelHeader: View {
     let store: AppStore
     @Binding var showingSettings: Bool
+    @Binding var showingAbout: Bool
+    /// The panel is open on screen (false while hidden and in snapshots): only then does anything tick or spin.
+    let isOnScreen: Bool
 
     @State private var refreshRotation: Double = 0
 
     var body: some View {
-        HStack(alignment: .center, spacing: 10) {
-            AppGlyph(size: 28)
+        HStack(alignment: .center, spacing: 9) {
+            HeaderGlyphButton(updates: store.updates) { showingAbout.toggle() }
 
             VStack(alignment: .leading, spacing: 1) {
                 HStack(alignment: .firstTextBaseline, spacing: 7) {
                     Text("PortPilot")
                         .font(.system(size: 13.5, weight: .semibold))
-                    UpdatedText(lastUpdated: store.lastUpdated)
+                    // Fixed width: the once-a-second text change must never change the panel's size (a size
+                    // change re-lays out every row, which was most of PortPilot's idle CPU).
+                    UpdatedText(lastUpdated: store.lastUpdated, ticks: isOnScreen)
                         .font(.system(size: 10.5).monospacedDigit())
                         .foregroundStyle(.tertiary)
-                        .fixedSize()
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .frame(width: PanelText.updatedLabelWidth, alignment: .leading)
                 }
                 Text(summary)
                     .font(.system(size: 11).monospacedDigit())
@@ -238,14 +443,15 @@ private struct PanelHeader: View {
                 store.refreshNow()
             }
             .rotationEffect(.degrees(refreshRotation))
-            .task(id: store.isScanning) { await spinWhileScanning() }
+            .task(id: isOnScreen && store.isScanning) { await spinWhileScanning() }
 
-            IconButton(systemImage: "gearshape", label: showingSettings ? "Close Settings" : "Settings",
-                       help: "Settings (⌘,)", isActive: showingSettings) {
-                showingSettings.toggle()
+            let settingsActive = showingSettings && !showingAbout
+            IconButton(systemImage: "gearshape", label: settingsActive ? "Close Settings" : "Settings",
+                       help: "Settings (⌘,)", isActive: settingsActive) {
+                PanelPages.toggleSettings(settings: &showingSettings, about: &showingAbout)
             }
         }
-        .padding(.leading, 14)
+        .padding(.leading, 13)
         .padding(.trailing, 10)
         .padding(.top, 12)
         .padding(.bottom, 10)
@@ -270,28 +476,43 @@ private struct PanelHeader: View {
     }
 
     /// Scans take a few ms; only spin when one is visibly slow so the icon doesn't twitch every tick.
+    /// Never while the panel is hidden: an animation there would redraw a window nobody sees.
     private func spinWhileScanning() async {
-        guard store.isScanning else { return }
+        guard isOnScreen, store.isScanning else { return }
         try? await Task.sleep(for: .milliseconds(250))
-        while !Task.isCancelled && store.isScanning {
+        while !Task.isCancelled && isOnScreen && store.isScanning {
             withAnimation(.linear(duration: 0.8)) { refreshRotation += 360 }
             try? await Task.sleep(for: .milliseconds(800))
         }
     }
 }
 
-/// "Updated 2s ago", ticking every second on its own.
+/// Header texts, kept pure for tests.
+enum PanelText {
+    /// Fixed width of the "Updated …" label; fits the longest label ("Updated 99d 23h ago") at 10.5 pt.
+    static let updatedLabelWidth: CGFloat = 130
+
+    /// "Updated just now", "Updated 12s ago", "Updated 3h 4m ago", "Not updated yet".
+    static func updatedLabel(lastUpdated: Date?, now: Date) -> String {
+        guard let lastUpdated else { return "Not updated yet" }
+        let elapsed = max(0, now.timeIntervalSince(lastUpdated))
+        return elapsed < 1.5 ? "Updated just now" : "Updated \(Format.uptime(since: lastUpdated, now: now)) ago"
+    }
+}
+
+/// "Updated 2s ago": ticks every second on its own while the panel is on screen; a static label otherwise
+/// (nobody sees it, and a ticking view keeps the hidden window busy).
 private struct UpdatedText: View {
     let lastUpdated: Date?
+    let ticks: Bool
 
     var body: some View {
-        if let lastUpdated {
+        if ticks, lastUpdated != nil {
             TimelineView(.periodic(from: Date(), by: 1)) { context in
-                let elapsed = max(0, context.date.timeIntervalSince(lastUpdated))
-                Text(elapsed < 1.5 ? "Updated just now" : "Updated \(Format.uptime(since: lastUpdated, now: context.date)) ago")
+                Text(PanelText.updatedLabel(lastUpdated: lastUpdated, now: context.date))
             }
         } else {
-            Text("Not updated yet")
+            Text(PanelText.updatedLabel(lastUpdated: lastUpdated, now: Date()))
         }
     }
 }
@@ -343,11 +564,14 @@ private struct SearchField: View {
 
 // MARK: - Banner
 
+/// Floating banner card: opaque base + style tint, since it sits on top of the list.
 private struct BannerView: View {
     let banner: Banner
-    let store: AppStore
+    let onAction: () -> Void
+    let onDismiss: () -> Void
 
     var body: some View {
+        let shape = RoundedRectangle(cornerRadius: 9, style: .continuous)
         HStack(alignment: .center, spacing: 8) {
             Image(systemName: symbol)
                 .font(.system(size: 13, weight: .semibold))
@@ -358,21 +582,24 @@ private struct BannerView: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
             if banner.action != nil, let title = banner.actionTitle {
-                Button(title) { store.performBannerAction(banner) }
+                Button(title, action: onAction)
                     .buttonStyle(HoverButtonStyle(padding: EdgeInsets(top: 3, leading: 8, bottom: 3, trailing: 8),
                                                   hoverTint: tint, isEmphasized: true))
                     .font(.system(size: 11.5, weight: .semibold))
                     .fixedSize()
             }
-            IconButton(systemImage: "xmark", label: "Dismiss", size: 10, weight: .bold) {
-                store.dismissBanner()
-            }
+            IconButton(systemImage: "xmark", label: "Dismiss", size: 10, weight: .bold, action: onDismiss)
         }
         .padding(.leading, 10)
         .padding(.trailing, 5)
         .padding(.vertical, 6)
-        .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(tint.opacity(0.12)))
-        .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(tint.opacity(0.25), lineWidth: 0.5))
+        .background {
+            shape.fill(Theme.floatingBackground)
+            shape.fill(tint.opacity(0.12))
+        }
+        .overlay(shape.strokeBorder(tint.opacity(0.3), lineWidth: 0.5))
+        .shadow(color: .black.opacity(0.14), radius: 6, y: 2)
+        .contentShape(shape)
         .accessibilityElement(children: .contain)
     }
 
@@ -441,12 +668,14 @@ private struct PanelFooter: View {
 
     var body: some View {
         HStack(spacing: 6) {
-            let projectCount = store.snapshot.groups.filter { $0.category == .project }.count
-            if projectCount > 0 {
+            // The same list Stop All stops (hidden projects excluded), so the count always matches.
+            let projects = store.stoppableProjects
+            if !projects.isEmpty {
                 ConfirmButton(title: "Stop All Projects",
-                              confirmTitle: projectCount == 1 ? "Stop 1 Project?" : "Stop \(projectCount) Projects?",
+                              confirmTitle: projects.count == 1 ? "Stop 1 Project?" : "Stop \(projects.count) Projects?",
                               systemImage: "stop.circle",
-                              foreground: AnyShapeStyle(.secondary)) {
+                              foreground: AnyShapeStyle(.secondary),
+                              armedHelp: StopReport.stopAllConfirmHelp(projects)) {
                     store.stopAllProjects()
                 }
             }

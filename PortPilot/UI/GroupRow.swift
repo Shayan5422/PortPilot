@@ -3,8 +3,8 @@ import SwiftUI
 
 /// One project / service / app in the list.
 ///
-///     ›  [icon]  Institut de mai                      :5330 :8014   ⋯  ⊗
-///                ~/Downloads/NODES/Institut de mai · 2h 14m   2.4% · 412 MB
+///     ›  [icon]  acme-shop                            :5330 :8014   ⋯  ⊗
+///                ~/Developer/acme-shop · 2h 14m   2.4% · 412 MB
 ///                [Vite] [uvicorn] [✦ Claude Code]
 ///
 /// Clicking the row toggles the process list; the port chips, path, menu and stop button handle their own clicks.
@@ -85,21 +85,9 @@ struct GroupRow: View {
 
     private var titleLine: some View {
         HStack(alignment: .center, spacing: 6) {
-            HStack(alignment: .firstTextBaseline, spacing: 5) {
-                Text(group.title)
-                    .font(.rowTitle)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .layoutPriority(1) // the subtitle truncates first
-                if let subtitle = group.subtitle, !subtitle.isEmpty, subtitle != group.title {
-                    Text(subtitle)
-                        .font(.rowBody)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                }
-            }
-            .help(group.title)
+            titleAndSubtitle
+                .help(titleHelp)
+                .layoutPriority(1) // the Spacer gives way first; the capped port chips never shrink
 
             Spacer(minLength: 6)
 
@@ -109,31 +97,81 @@ struct GroupRow: View {
         .frame(minHeight: 20)
     }
 
+    /// Title + subtitle in the space left by the port chips: the full subtitle when it fits, else a truncated one,
+    /// else the title alone (truncated in the middle when it is path-like) — never a clipped subtitle sliver.
+    @ViewBuilder
+    private var titleAndSubtitle: some View {
+        if let subtitle = visibleSubtitle {
+            NameAndDetail(name: titleText, detail: subtitleText(subtitle))
+        } else {
+            titleText
+        }
+    }
+
+    private var titleText: some View {
+        Text(group.title)
+            .font(.rowTitle)
+            .lineLimit(1)
+            .truncationMode(Self.titleTruncation(for: group.title))
+    }
+
+    private func subtitleText(_ subtitle: String) -> some View {
+        Text(subtitle)
+            .font(.rowBody)
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .truncationMode(.tail)
+    }
+
+    private var visibleSubtitle: String? {
+        guard let subtitle = group.subtitle, !subtitle.isEmpty, subtitle != group.title else { return nil }
+        return subtitle
+    }
+
+    /// "title — subtitle"; a launchd group shows its full job label instead of the short title.
+    private var titleHelp: String {
+        let name = launchdLabel ?? group.title
+        return visibleSubtitle.map { "\(name) — \($0)" } ?? name
+    }
+
+    private var launchdLabel: String? {
+        group.processes.lazy.compactMap { process -> String? in
+            if case .launchd(let job) = process.manager { return job.label }
+            return nil
+        }.first
+    }
+
+    /// Text of the orange notice above "Stop & Disable". For launchd it says what the two buttons do: Stop unloads
+    /// the job until next login (KeepAlive can't restart it before then); Stop & Disable keeps it off where
+    /// PortPilot can turn auto-start off, else the user is pointed to Login Items.
+    static func autoRestartNotice(for manager: ProcessManager) -> String {
+        if case .launchd(let job) = manager, job.keepAlive || job.runAtLoad {
+            guard LaunchdService().isManageable(plistPath: job.plistPath) else {
+                return "launchd starts this again at next login. Turn that off in \(StopReport.loginItemsSettings)."
+            }
+            return "launchd starts this again at next login. Stop & Disable keeps it off."
+        }
+        return manager.autoRestartExplanation ?? "Restarts automatically."
+    }
+
+    /// Path-like titles ("acme-public-deployment-20261008/release") keep their distinctive last component.
+    static func titleTruncation(for title: String) -> Text.TruncationMode {
+        title.contains("/") ? .middle : .tail
+    }
+
     private var portChips: some View {
-        let ports = group.ports
         let exposed = exposedPorts
         // Keep room for the title: 3 ports show as 3 chips, 4+ as 2 chips and "+N".
-        let shown = ports.count > Self.maxInlinePorts ? Self.maxInlinePorts - 1 : ports.count
-        let hidden = ports.dropFirst(shown)
-        return HStack(spacing: 4) {
-            ForEach(ports.prefix(shown), id: \.self) { port in
-                PortChip(port: port, isExposed: exposed.contains(port), store: store)
+        return CappedPortChips(ports: group.ports, limit: Self.maxInlinePorts) { port in
+            PortChip(port: port, isExposed: exposed.contains(port), store: store)
+        } overflow: { hidden in
+            Button(action: toggleExpanded) {
+                OverflowChipLabel(count: hidden.count)
             }
-            if !hidden.isEmpty {
-                Button(action: toggleExpanded) {
-                    Text(verbatim: "+\(hidden.count)")
-                        .font(.system(size: 11, weight: .semibold).monospacedDigit())
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 2.5)
-                        .background(RoundedRectangle(cornerRadius: 5, style: .continuous).fill(Theme.chipFill))
-                }
-                .buttonStyle(.plain)
-                .help("Also listening on " + hidden.map { ":\($0)" }.joined(separator: "  ") + " — click to show processes")
-                .accessibilityLabel("\(hidden.count) more ports")
-            }
+            .buttonStyle(.plain)
+            .help("Also listening on " + PortChipOverflow.list(hidden) + " — click to show processes")
+            .accessibilityLabel("\(hidden.count) more ports")
         }
-        .fixedSize()
     }
 
     private var detailLine: some View {
@@ -144,7 +182,7 @@ struct GroupRow: View {
             } else if let command = group.processes.first?.commandLine {
                 Text(DisplayText.command(command))
                     .font(.command)
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .layoutPriority(-1)
@@ -227,24 +265,51 @@ struct GroupRow: View {
             .help("More actions")
             .accessibilityLabel("More actions for \(group.title)")
 
-            if isBusy {
-                ProgressView()
-                    .controlSize(.small)
-                    .scaleEffect(0.75)
+            stopControl
+        }
+        .frame(height: 20)
+    }
+
+    /// One click for projects and services; two clicks for apps, macOS services and other users' processes
+    /// (see `StopSafety`); nothing for launchd itself. ⌥ on the (final) click force-kills.
+    @ViewBuilder
+    private var stopControl: some View {
+        if isBusy {
+            ProgressView()
+                .controlSize(.small)
+                .scaleEffect(0.75)
+                .frame(width: 22, height: 22)
+                .accessibilityLabel("Stopping \(group.title)")
+        } else {
+            switch StopSafety.forGroup(group) {
+            case .unavailable:
+                // Keeps the ⋯ buttons of all rows in one column.
+                Color.clear
                     .frame(width: 22, height: 22)
-                    .accessibilityLabel("Stopping \(group.title)")
-            } else {
+                    .accessibilityHidden(true)
+            case .oneClick:
                 IconButton(systemImage: "xmark.circle.fill",
                            label: "Stop \(group.title)",
                            help: "Stop \(group.title) — ⌥-click to force kill",
                            size: 15,
                            foreground: AnyShapeStyle(.tertiary),
-                           hoverTint: Theme.destructive) {
-                    store.stop(group, mode: NSEvent.modifierFlags.contains(.option) ? .force : .graceful)
-                }
+                           hoverTint: Theme.destructive,
+                           action: stopFromButton)
+            case .confirm(let reason):
+                ConfirmButton(title: "", confirmTitle: "Stop?", systemImage: "xmark.circle.fill",
+                              foreground: AnyShapeStyle(.tertiary),
+                              help: "Stop \(group.title) (asks to confirm) — ⌥-click to force kill",
+                              armedHelp: reason.armedHelp(title: group.title),
+                              accessibilityName: "Stop \(group.title)",
+                              iconSize: 15,
+                              action: stopFromButton)
+                    .fixedSize()
             }
         }
-        .frame(height: 20)
+    }
+
+    private func stopFromButton() {
+        store.stop(group, mode: NSEvent.modifierFlags.contains(.option) ? .force : .graceful)
     }
 
     private func toggleExpanded() {
@@ -275,9 +340,10 @@ private struct PathLink: View {
         Button {
             store.revealInFinder(path)
         } label: {
+            // .secondary, not .tertiary: the folder is the row's key fact and must stay legible (≈1.9:1 before).
             Text(Format.abbreviatePath(path))
                 .font(.rowCaption)
-                .foregroundStyle(isHovering ? AnyShapeStyle(.secondary) : AnyShapeStyle(.tertiary))
+                .foregroundStyle(isHovering ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
                 .underline(isHovering, color: .secondary)
                 .lineLimit(1)
                 .truncationMode(.middle)
@@ -384,7 +450,7 @@ private struct AutoRestartNotice: View {
             Image(systemName: "arrow.clockwise.circle.fill")
                 .font(.system(size: 13))
                 .foregroundStyle(Theme.autoRestart)
-            Text(manager.autoRestartExplanation ?? "Restarts automatically.")
+            Text(GroupRow.autoRestartNotice(for: manager))
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -442,19 +508,36 @@ struct GroupActionsMenu: View {
             store.copy(group.processes.map { String($0.basic.pid) }.joined(separator: " "))
         }
 
-        Divider()
-
-        Button("Stop") { store.stop(group, mode: .graceful) }
-            .disabled(isBusy)
-        Button("Force Kill") { store.stop(group, mode: .force) }
-            .disabled(isBusy)
-        if group.autoRestartManager != nil {
-            Button("Stop & Disable Auto-Start") { store.stopAndDisableAutoStart(group) }
-                .disabled(isBusy)
+        let safety = StopSafety.forGroup(group)
+        if safety.isAvailable {
+            Divider()
+            if let reason = safety.reason {
+                // Same two-step rule as the row's Stop button: the stop items sit one level down, under a note
+                // that says what stopping this means.
+                Menu("Stop") {
+                    Text(reason.menuNote)
+                    Divider()
+                    stopItems(named: true)
+                }
+            } else {
+                stopItems(named: false)
+            }
         }
 
         Divider()
 
         Button("Hide This Item") { store.ignore(group) }
+    }
+
+    @ViewBuilder
+    private func stopItems(named: Bool) -> some View {
+        Button(named ? "Stop \(group.title)" : "Stop") { store.stop(group, mode: .graceful) }
+            .disabled(isBusy)
+        Button(named ? "Force Kill \(group.title)" : "Force Kill") { store.stop(group, mode: .force) }
+            .disabled(isBusy)
+        if group.autoRestartManager != nil {
+            Button("Stop & Disable Auto-Start") { store.stopAndDisableAutoStart(group) }
+                .disabled(isBusy)
+        }
     }
 }

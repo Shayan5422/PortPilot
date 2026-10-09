@@ -1,13 +1,43 @@
-# PortPilot
+<p align="center">
+  <img src="docs/images/logo.png" width="128" alt="PortPilot logo">
+</p>
 
-A native macOS menu bar app that shows which ports are open on your Mac, which project folder
-each one belongs to, how much CPU and memory it uses, and lets you stop it with one click. That
-includes servers that would otherwise come back on their own through launchd, pm2 or Docker.
+<h1 align="center">PortPilot</h1>
 
-![PortPilot menu bar panel](docs/screenshot.png)
+<p align="center">
+  <b>See every port your projects open — and close them in one click.</b><br>
+  A native macOS menu bar app for developers whose tools keep landing on random ports.
+</p>
 
-<sub>Screenshot placeholder. To regenerate it from live data:
-`dist/PortPilot.app/Contents/MacOS/PortPilot --snapshot docs/screenshot.png`</sub>
+<p align="center">
+  <a href="https://github.com/Shayan5422/PortPilot/releases/latest"><img alt="Download for macOS" src="https://img.shields.io/badge/Download-macOS%2014%2B-0A84FF?logo=apple&logoColor=white"></a>
+  <a href="https://github.com/Shayan5422/PortPilot/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/Shayan5422/PortPilot?label=release&color=555"></a>
+  <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-2ea44f"></a>
+  <img alt="Universal: Apple Silicon and Intel" src="https://img.shields.io/badge/Apple%20Silicon%20%2B%20Intel-universal-555">
+</p>
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/panel-dark.png">
+    <img src="docs/images/panel-light.png" width="440" alt="The PortPilot panel: ports grouped by project, with CPU, memory, auto-start badges and one-click Stop">
+  </picture>
+</p>
+
+PortPilot shows which ports are open on your Mac, which project folder each one belongs to, how
+much CPU and memory it uses, and lets you stop it with one click. That includes servers that would
+otherwise come back on their own through launchd, pm2 or Docker.
+
+## Download
+
+1. Download **PortPilot-x.y.z.dmg** from the [latest release](https://github.com/Shayan5422/PortPilot/releases/latest).
+2. Open it and drag **PortPilot** into **Applications**.
+3. Open PortPilot from Applications. It is signed with an Apple Developer ID and notarized by
+   Apple, so it opens without any security warning.
+4. Look for the <img src="docs/images/logo.png" width="14" alt=""> icon in the menu bar, next to Wi-Fi. A short welcome guide
+   walks you through the rest.
+
+PortPilot needs macOS 14 Sonoma or later and runs natively on Apple Silicon and Intel. It checks
+GitHub once a day for a newer version and tells you when there is one (you can turn that off).
 
 ## Why
 
@@ -45,30 +75,40 @@ every few seconds, and answers three questions at a glance:
   editor (Cursor, VS Code, Zed or Xcode), copy the URL, port, PIDs or command, and hide items you
   don't care about.
 - **Optional notifications** when a new port opens.
+- **Update check.** Once a day PortPilot asks GitHub whether a newer release exists and shows a
+  quiet notice when there is one. Nothing is downloaded or installed for you, and you can turn the
+  check off in Settings.
 - **Light and dark mode** with a native look. Everything happens inside the panel.
 
-## Requirements
+## Screenshots
 
-- macOS 14 Sonoma or later. The Release build is universal (Apple Silicon and Intel). It is
-  developed on Apple Silicon.
-- To build: Xcode 15 or later (developed with Xcode 27) and [XcodeGen](https://github.com/yonaskolb/XcodeGen):
-  `brew install xcodegen`.
+<table>
+  <tr>
+    <td align="center"><img src="docs/images/welcome-light.png" width="300" alt="Welcome guide"><br><sub>Welcome guide on first launch</sub></td>
+    <td align="center"><img src="docs/images/settings-dark.png" width="260" alt="Settings"><br><sub>Settings</sub></td>
+    <td align="center"><img src="docs/images/about-light.png" width="260" alt="About"><br><sub>About</sub></td>
+  </tr>
+</table>
 
-## Install
+## Build from source
+
+Requirements: macOS 14 or later, Xcode 15 or later (developed with Xcode 27) and
+[XcodeGen](https://github.com/yonaskolb/XcodeGen) (`brew install xcodegen`).
 
 ```sh
-git clone <this repo> PortPilot && cd PortPilot
+git clone https://github.com/Shayan5422/PortPilot.git && cd PortPilot
 ./scripts/install.sh
 ```
 
 `install.sh` does the following:
 
-1. Builds a Release copy (`scripts/build.sh`: `xcodegen generate` + `xcodebuild`, ad-hoc
-   signed) into `dist/PortPilot.app`. Pass `--no-build` to reuse an existing build.
+1. Builds a Release copy (`scripts/build.sh`: `xcodegen generate` + `xcodebuild`, signed with
+   your Apple Development identity when the keychain has one, else ad hoc) into
+   `dist/PortPilot.app`. Pass `--no-build` to reuse an existing build.
 2. Quits a running PortPilot gracefully (AppleScript `quit`, falling back to `pkill -x PortPilot`
    for your user only) and unloads the previous LaunchAgent.
 3. Copies the app to `~/Applications/PortPilot.app` and clears the quarantine flag.
-4. Writes `~/Library/LaunchAgents/app.portpilot.agent.plist`, then runs `launchctl enable` and
+4. Writes `~/Library/LaunchAgents/eu.shhshm.PortPilot.agent.plist`, then runs `launchctl enable` and
    `launchctl bootstrap gui/$UID`. That starts the app right away.
 5. Checks that the process is running.
 
@@ -88,7 +128,7 @@ Full build logs are written to `build/xcodebuild-*.log`.
 PortPilot is started by a per-user **LaunchAgent**, not by a login item inside the app:
 
 ```xml
-<key>Label</key>                  <string>app.portpilot.agent</string>
+<key>Label</key>                  <string>eu.shhshm.PortPilot.agent</string>
 <key>ProgramArguments</key>       <array><string>~/Applications/PortPilot.app/Contents/MacOS/PortPilot</string></array>
 <key>RunAtLoad</key>              <true/>
 <key>KeepAlive</key>              <dict><key>SuccessfulExit</key><false/></dict>
@@ -148,7 +188,7 @@ from the group's ⋯ menu:
 | Managed by | Stop | Stop & Disable Auto-Start |
 | --- | --- | --- |
 | **launchd** (LaunchAgents, `brew services`) | `launchctl bootout gui/$UID/<label>`: stopped until next login | bootout + `launchctl disable`: stays off across logins. The plist is kept; re-enable it under *Startup Items*. |
-| **pm2** | `pm2 stop <id>` | `pm2 delete <id>` + `pm2 save --force`, so `pm2 resurrect` won't bring it back |
+| **pm2** | `pm2 stop <id>` | `pm2 delete <id>`, and that app alone is removed from pm2's saved list (`dump.pm2`, previous copy kept as `dump.pm2.bak`), so `pm2 resurrect` won't bring it back. PortPilot never runs `pm2 save`. |
 | **Docker** | `docker stop <id>` | `docker update --restart=no <id>` + `docker stop` |
 | **Watchers** (nodemon, `tsx watch`, `uvicorn --reload`, cargo-watch…) | The watcher is part of the stop plan, so a normal Stop is enough | n/a |
 
@@ -162,14 +202,18 @@ as well.
 
 ## Privacy
 
-- **No network access.** PortPilot makes no outgoing connections. Clicking a port chip opens
-  `http://localhost:PORT` in your browser. That is the only network-related action.
+- **One network request, and only one.** Once a day PortPilot asks GitHub's public API for the
+  latest release (`api.github.com/repos/Shayan5422/PortPilot/releases/latest`). Like any web
+  request it shows GitHub your IP address; it carries no cookies and nothing about you or your
+  Mac beyond the app's version (in its User-Agent). Turn it off with *Settings → Check for updates
+  automatically*. Clicking a port chip opens `http://localhost:PORT` in your browser.
 - **No telemetry, analytics or accounts.**
 - Everything is read locally: the process table through `sysctl`/`libproc`, plus `launchctl`, and
   `pm2`/`docker` only when they are relevant (see above).
 - Recently stopped commands can contain secrets in their environment, so they are kept **in
   memory only** and are never written to disk.
-- Settings live in `UserDefaults` (`app.portpilot.PortPilot`). The app's own output and relaunched
+- Settings live in `UserDefaults` (`eu.shhshm.PortPilot`), along with the date of the last
+  update check and which folders PortPilot has asked about. The app's own output and relaunched
   servers' output go to `~/Library/Logs/PortPilot/`.
 - The app is not sandboxed. It has to inspect and signal other processes, and that is not
   possible inside the App Sandbox.
@@ -186,12 +230,20 @@ PP=~/Applications/PortPilot.app/Contents/MacOS/PortPilot
 "$PP" --plan 12345                # what Stop would signal for the listener with pid 12345; nothing is sent
 "$PP" --snapshot out.png          # render the panel with live data to a PNG
 "$PP" --snapshot out.png --dark   # …in dark mode
+"$PP" --snapshot out.png --demo   # …with sample data instead (nothing is scanned)
+"$PP" --snapshot out.png --settings   # Settings; also --about, or --welcome [--folder-step] [--move]
+"$PP" --check-updates             # ask GitHub for the latest release and print the answer
 ```
 
 `--dump` and `--snapshot` also accept `--all`, which includes other users' and system
-listeners.
+listeners. `--snapshot` also accepts `--expand-all`.
 
 ## Uninstall
+
+If you installed from the DMG: open PortPilot's Settings, turn off **Launch at login**, choose
+**Quit**, then move PortPilot from Applications to the Trash.
+
+If you installed from source:
 
 ```sh
 ./scripts/uninstall.sh           # asks for confirmation
@@ -209,7 +261,7 @@ This unloads and deletes the LaunchAgent, quits the app and removes
   PortPilot is running:
   ```sh
   pgrep -x PortPilot
-  launchctl print gui/$UID/app.portpilot.agent | grep -E 'state|last exit'
+  launchctl print gui/$UID/eu.shhshm.PortPilot.agent | grep -E 'state|last exit'
   tail -n 50 ~/Library/Logs/PortPilot/portpilot.log
   ```
 - **It doesn't start at login, or `install.sh` says bootstrap failed.** Open *System Settings →
@@ -231,21 +283,40 @@ This unloads and deletes the LaunchAgent, quits the app and removes
 ## Project layout
 
 ```
-PortPilot/App/        entry point (MenuBarExtra), AppStore (state + actions), CLI modes
+PortPilot/App/        entry point (MenuBarExtra), AppStore (state + actions), CLI modes, update and
+                      folder-access state
 PortPilot/Core/       models, process table / socket scanning, project resolver, classifier
 PortPilot/Control/    launchd / pm2 / docker services, kill planner, process killer, relauncher,
-                      login item (LaunchAgent) manager, notifications
-PortPilot/UI/         SwiftUI panel, rows, settings, snapshot renderer
-PortPilot/Resources/  Info.plist, Assets.xcassets (app icon, accent colour)
-PortPilotTests/       unit tests for the pure logic
-scripts/              build.sh, install.sh, uninstall.sh, make-icon.swift
+                      login item (LaunchAgent) manager, notifications, update checker, app mover
+PortPilot/UI/         SwiftUI panel, rows, settings, About, welcome window, snapshot renderer
+PortPilot/Resources/  Info.plist, Assets.xcassets (app icon, logo, menu bar icon, accent colour)
+PortPilotTests/       unit tests for the pure logic, plus tests that start and stop their own processes
+scripts/              build.sh, install.sh, uninstall.sh, release.sh, make-brand-assets.swift
 docs/SPEC.md          implementation spec
 ```
 
 `PortPilot.xcodeproj` is generated from `project.yml`. Run `xcodegen generate` and open it in
-Xcode. The app icon is drawn in code: `swift scripts/make-icon.swift` regenerates every size in
-`PortPilot/Resources/Assets.xcassets/AppIcon.appiconset`, and `--preview sheet.png` also writes a
-contact sheet.
+Xcode. `swift scripts/make-brand-assets.swift` regenerates the app icon, the logo, the menu bar
+icon, the README artwork and the DMG background from `Design/logo.png`; `--preview sheet.png` also
+writes a contact sheet.
+
+## Contributing
+
+Bug reports and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md), and report
+security issues as described in [SECURITY.md](SECURITY.md).
+
+## Author
+
+Made by **Shayan Hashemi**:
+[website](https://www.shhshm.eu/) ·
+[GitHub](https://github.com/Shayan5422) ·
+[LinkedIn](https://www.linkedin.com/in/shhshm/)
+
+If PortPilot saves you from a few `lsof -i` sessions, a ⭐️ on the repo is appreciated.
+
+## License
+
+[MIT](LICENSE) © 2026 Shayan Hashemi
 
 ---
 
@@ -257,9 +328,12 @@ PortPilot یک برنامهٔ نوار منوی مک است. هر چند ثان�
 
 **نصب**
 
-1. اگر XcodeGen ندارید: `brew install xcodegen`
-2. در پوشهٔ پروژه این را اجرا کنید: `./scripts/install.sh`
-3. آیکون PortPilot کنار Wi-Fi در نوار منو ظاهر می‌شود.
+1. فایل DMG را از بخش [Releases](https://github.com/Shayan5422/PortPilot/releases/latest) دانلود کنید.
+2. بازش کنید و PortPilot را به پوشهٔ Applications بکشید.
+3. برنامه را باز کنید. با Developer ID امضا و توسط اپل notarize شده است، پس هشداری نمی‌بینید.
+4. آیکون PortPilot کنار Wi-Fi در نوار منو ظاهر می‌شود.
+
+برای ساختن از سورس: `brew install xcodegen` و بعد `./scripts/install.sh`
 
 **اجرای خودکار:** نصب‌کننده یک LaunchAgent می‌سازد. برنامه بعد از هر ورود به سیستم و هر ری‌استارت خودش اجرا می‌شود. اگر کرش کند دوباره باز می‌شود، ولی اگر خودتان Quit کنید تا ورود بعدی بسته می‌ماند. برای خاموش کردنش در تنظیمات برنامه گزینهٔ Launch at login را بردارید.
 
@@ -267,8 +341,8 @@ PortPilot یک برنامهٔ نوار منوی مک است. هر چند ثان�
 
 **لغو اجرای خودکار:** بعضی سرویس‌ها با launchd، pm2 یا Docker دوباره بالا می‌آیند. برای آن‌ها از منوی «⋯» گزینهٔ **Stop & Disable Auto-Start** را بزنید، یا در بخش **Startup Items** آن مورد را غیرفعال کنید.
 
-**حریم خصوصی:** برنامه به اینترنت وصل نمی‌شود و هیچ داده‌ای ارسال نمی‌کند.
+**حریم خصوصی:** برنامه هیچ داده‌ای دربارهٔ شما ارسال نمی‌کند. تنها اتصال آن به اینترنت، بررسی روزانهٔ نسخهٔ جدید در GitHub است که می‌توانید در تنظیمات خاموشش کنید.
 
-**حذف برنامه:** `./scripts/uninstall.sh`
+**حذف برنامه:** در تنظیمات Launch at login را خاموش کنید، Quit بزنید و برنامه را از Applications به سطل زباله ببرید. اگر از سورس نصب کرده‌اید: `./scripts/uninstall.sh`
 
 </div>

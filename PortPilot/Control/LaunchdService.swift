@@ -239,6 +239,46 @@ final class LaunchdService: @unchecked Sendable {
         throw ControlError("Couldn't load \(label): \(bootstrap.message)")
     }
 
+    // MARK: - Reversible disable
+
+    /// Folders whose agents Startup Items lists: an agent disabled there can be switched back on from the panel.
+    var manageableAgentDirectories: [String] { [userAgentsDirectory, Self.sharedAgentsDirectory] }
+
+    /// True when `plistPath` is a `.plist` directly inside ~/Library/LaunchAgents or /Library/LaunchAgents.
+    func isManageable(plistPath: String?) -> Bool {
+        guard let plistPath, plistPath.hasPrefix("/"), plistPath.hasSuffix(".plist") else { return false }
+        let standardized = (plistPath as NSString).standardizingPath
+        let directory = (standardized as NSString).deletingLastPathComponent
+        return manageableAgentDirectories.contains { ($0 as NSString).standardizingPath == directory }
+    }
+
+    /// True when Stop & Disable may write a persistent `launchctl disable` for `job`: a non-Apple agent in the
+    /// user's GUI domain whose plist sits in a LaunchAgents folder, still declares this label and loads in the GUI
+    /// session — exactly the agents Startup Items shows, where the toggle undoes the disable.
+    ///
+    /// False for SMAppService helpers (no plist path), plists inside app bundles or project folders, and daemons:
+    /// PortPilot could never undo a disable for those, so they should only be stopped (`stop(label:)`).
+    /// Reads the plist; call it off the main thread.
+    func canDisableReversibly(job: LaunchdJob) -> Bool {
+        guard job.isUserAgent, job.domain == guiDomain, Self.isValidLabel(job.label),
+              !job.label.hasPrefix("com.apple."), let path = job.plistPath, isManageable(plistPath: path),
+              let info = Self.readPlist(at: path) else { return false }
+        return info.label == job.label && info.loadsInGUISession
+    }
+
+    /// Stop & Disable for one job, never leaving a disable PortPilot can't undo: `disable(label:)` when
+    /// `canDisableReversibly(job:)`, otherwise only `stop(label:)` (it may start again at next login).
+    /// Returns true when auto-start was disabled, false when the job was only stopped.
+    @discardableResult
+    func stopAndDisableIfReversible(job: LaunchdJob) throws -> Bool {
+        if canDisableReversibly(job: job) {
+            try disable(label: job.label)
+            return true
+        }
+        try stop(label: job.label)
+        return false
+    }
+
     /// `launchctl kickstart gui/<uid>/<label>`.
     func start(label: String) throws {
         try Self.validate(label)

@@ -498,6 +498,268 @@ final class KillPlannerTests: XCTestCase {
         XCTAssertEqual(label(["node", "/Users/me/app/node_modules/.bin/vite"]), "node vite")
         XCTAssertEqual(label(["/usr/bin/python3", "-m", "http.server", "8000"]), "python3 -m http.server 8000")
         XCTAssertEqual(label(["-zsh"]), "zsh")
+        XCTAssertEqual(label(["npm run dev", "", "", ""]), "npm run dev")
+        // Interpreter tuning options are noise; how it runs is not.
+        XCTAssertEqual(label(["/opt/homebrew/Cellar/node/25.4.0/bin/node", "--test-concurrency=0",
+                              "--max-http-header-size=16384", "--use-system-ca", "--inspect-port=127.0.0.1:9229",
+                              "--node-snapshot", "server.js"]), "node server.js", "node --watch's child")
+        XCTAssertEqual(label(["node", "--watch", "--enable-source-maps", "server.js"]), "node --watch server.js")
+        XCTAssertEqual(label(["node", "-r", "dotenv/config", "dist/main.js", "--port", "3000"]),
+                       "node dist/main.js --port 3000")
+        XCTAssertEqual(label(["python3", "-u", "-m", "uvicorn", "app:app"]), "python3 -m uvicorn app:app")
+        XCTAssertEqual(label(["node", "--max-old-space-size=4096", "/opt/homebrew/bin/npm", "run", "dev"]), "npm run dev")
+        XCTAssertEqual(label(["java", "-Xmx2g", "-jar", "app.jar"]), "java -jar app.jar")
+    }
+
+    // MARK: Coding agents are never the plan root (finding #2)
+
+    /// <agent> (cwd = project) → zsh -c "npm run dev" → npm (title) → sh -c "node server.js" → node server.js.
+    /// Returns the npm pid and the agent pid.
+    @discardableResult
+    private func addAgentLaunchedNpmTree(_ system: FakeSystem, agentArgs: [String], agentExe: String,
+                                         agentComm: String, npmArgs: [String] = ["npm run dev", "", "", ""],
+                                         cwd: String = projectPath) -> (npm: Int32, agent: Int32, listener: Int32) {
+        let zsh = addTerminalSession(system, base: 400)
+        system.add(500, ppid: zsh, comm: agentComm, args: agentArgs, exe: agentExe, cwd: cwd)
+        system.add(501, ppid: 500, comm: "zsh", args: ["/bin/zsh", "-lc", "npm run dev"], exe: "/bin/zsh", cwd: cwd)
+        system.add(502, ppid: 501, comm: "node", args: npmArgs, exe: nodeExe, cwd: cwd)
+        system.add(503, ppid: 502, comm: "sh", args: ["sh", "-c", "node server.js"], exe: "/bin/sh", cwd: cwd, pgid: 502)
+        system.add(504, ppid: 503, comm: "node", args: ["node", "server.js"], exe: nodeExe, cwd: cwd, pgid: 502)
+        return (502, 500, 504)
+    }
+
+    func testAgentsThatStartedTheServerAreNeverStopped() {
+        let agents: [(args: [String], exe: String, comm: String)] = [
+            // Kimi Code: a native binary the hard-coded lists used to miss.
+            (["kimi"], "/Users/me/.kimi-code/bin/kimi", "kimi"),
+            // Qwen Code: a node script, so its executable name is just "node".
+            (["node", "/opt/homebrew/bin/qwen"], nodeExe, "node"),
+            (["/opt/homebrew/opt/node/bin/node", "--max-old-space-size=8192", "/opt/homebrew/Cellar/gemini-cli/0.25.2/bin/gemini"],
+             nodeExe, "node"),
+            (["node", "/opt/homebrew/lib/node_modules/@qwen-code/qwen-code/cli.js", "--yolo"], nodeExe, "node"),
+            (["node", "/opt/homebrew/lib/node_modules/@google/gemini-cli/dist/index.js"], nodeExe, "node"),
+            (["node", "/Users/me/.npm-global/lib/node_modules/@openai/codex/bin/codex.js"], nodeExe, "node"),
+            (["codex", "app-server"], "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex", "codex"),
+            (["droid"], "/Users/me/.local/bin/droid", "droid"),
+            (["node", "/opt/homebrew/bin/copilot"], nodeExe, "node"),
+            (["/Users/me/.local/share/uv/tools/aider-chat/bin/python", "/Users/me/.local/bin/aider"],
+             "/Users/me/.local/share/uv/python/cpython-3.12/bin/python3.12", "python3.12"),
+            (["claude"], "/Users/me/.local/share/claude/versions/2.1.0", "2.1.0"),
+            // A totally unknown agent: only the removal of the bare "cwd is in the project" rule protects it.
+            (["mystery-agent", "--workspace", projectPath], "/Users/me/.local/bin/mystery-agent", "mystery-agent"),
+        ]
+        for agent in agents {
+            let system = FakeSystem()
+            let tree = addAgentLaunchedNpmTree(system, agentArgs: agent.args, agentExe: agent.exe, agentComm: agent.comm)
+            let plan = system.plan(for: system.listener(tree.listener, ports: [3000]))
+            XCTAssertEqual(plan.root.pid, tree.npm, "\(agent.args)")
+            XCTAssertEqual(Set(pids(plan.targets)), [502, 503, 504], "\(agent.args)")
+            XCTAssertFalse(pids(plan.targets).contains(tree.agent), "the agent survives: \(agent.args)")
+        }
+    }
+
+    func testAgentAboveScriptFormNpmAndVite() {
+        let system = FakeSystem()
+        let zsh = addTerminalSession(system, base: 400)
+        system.add(500, ppid: zsh, comm: "node", args: ["node", "/opt/homebrew/bin/qwen"], exe: nodeExe, cwd: projectPath)
+        system.add(501, ppid: 500, comm: "bash", args: ["bash", "-c", "npm run dev"], exe: "/bin/bash", cwd: projectPath)
+        system.add(502, ppid: 501, comm: "node", args: ["node", "/opt/homebrew/bin/npm", "run", "dev"], exe: nodeExe,
+                   cwd: projectPath)
+        system.add(503, ppid: 502, comm: "sh", args: ["sh", "-c", "vite"], exe: "/bin/sh", cwd: projectPath)
+        system.add(504, ppid: 503, comm: "node", args: ["node", "\(projectPath)/node_modules/.bin/vite"], exe: nodeExe,
+                   cwd: projectPath)
+        let plan = system.plan(for: system.listener(504))
+        XCTAssertEqual(plan.root.pid, 502)
+        XCTAssertEqual(pids(plan.targets), [504, 503, 502])
+    }
+
+    func testProgramWithOnlyAProjectCwdIsNotAnAnchor() {
+        let system = FakeSystem()
+        let zsh = addTerminalSession(system, base: 400)
+        // A native tool sitting in the project folder, pointing at it with an absolute argument.
+        system.add(520, ppid: zsh, comm: "devtool", args: ["devtool", "--root", projectPath],
+                   exe: "/Users/me/.local/bin/devtool", cwd: projectPath)
+        system.add(521, ppid: 520, comm: "node", args: ["node", "server.js"], exe: nodeExe, cwd: projectPath)
+        XCTAssertEqual(system.plan(for: system.listener(521)).root.pid, 521)
+
+        // Interpreters running a project script are anchors, relative or absolute, with or without options.
+        let scripts: [[String]] = [
+            ["node", "scripts/dev.js"], ["node", "--env-file", ".env", "./scripts/dev.mjs"],
+            ["node", "-r", "dotenv/config", "\(projectPath)/scripts/dev.js"],
+            ["/opt/homebrew/bin/python3", "manage.py", "runserver"], ["php", "artisan", "serve"],
+            ["ruby", "bin/dev"], ["bun", "run", "src/dev.ts"],
+        ]
+        for (offset, args) in scripts.enumerated() {
+            let parent = Int32(530 + offset * 2)
+            let exe = args[0].hasPrefix("/") ? args[0] : "/opt/homebrew/bin/\(args[0])"
+            system.add(parent, ppid: zsh, comm: args[0], args: args, exe: exe, cwd: projectPath)
+            system.add(parent + 1, ppid: parent, comm: "node", args: ["node", "server.js"], exe: nodeExe, cwd: projectPath)
+            XCTAssertEqual(system.plan(for: system.listener(parent + 1)).root.pid, parent, "\(args)")
+        }
+
+        // Runners count whatever their cwd: `make dev` (Apple's make runs as gnumake) and `bun dev`.
+        let runners: [(args: [String], exe: String)] = [
+            (["/Applications/Xcode.app/Contents/Developer/usr/bin/make", "-s", "dev"],
+             "/Applications/Xcode.app/Contents/Developer/usr/bin/gnumake"),
+            (["bun", "dev"], "/Users/me/.bun/bin/bun"),
+        ]
+        for (offset, runner) in runners.enumerated() {
+            let parent = Int32(550 + offset * 3)
+            system.add(parent, ppid: zsh, comm: (runner.exe as NSString).lastPathComponent, args: runner.args,
+                       exe: runner.exe, cwd: projectPath)
+            system.add(parent + 1, ppid: parent, comm: "sh", args: ["/bin/sh", "-c", "node server.js"], exe: "/bin/sh",
+                       cwd: projectPath)
+            system.add(parent + 2, ppid: parent + 1, comm: "node", args: ["node", "server.js"], exe: nodeExe,
+                       cwd: projectPath)
+            XCTAssertEqual(system.plan(for: system.listener(parent + 2)).root.pid, parent, "\(runner.args)")
+        }
+
+        // …but not one running a script from elsewhere, inline code or a module.
+        let others: [[String]] = [
+            ["node", "/opt/homebrew/lib/node_modules/some-tool/cli.js"], ["node", "-e", "require('./x')"],
+            ["/opt/homebrew/bin/python3", "-m", "some_tool"], ["node", "../other-project/run.js"],
+        ]
+        for (offset, args) in others.enumerated() {
+            let parent = Int32(560 + offset * 2)
+            let exe = args[0].hasPrefix("/") ? args[0] : "/opt/homebrew/bin/\(args[0])"
+            system.add(parent, ppid: zsh, comm: args[0], args: args, exe: exe, cwd: projectPath)
+            system.add(parent + 1, ppid: parent, comm: "node", args: ["node", "server.js"], exe: nodeExe, cwd: projectPath)
+            XCTAssertEqual(system.plan(for: system.listener(parent + 1)).root.pid, parent + 1, "\(args)")
+        }
+    }
+
+    func testNpmTitleIsARootEvenWithoutAProject() {
+        let system = FakeSystem()
+        let zsh = addTerminalSession(system, base: 400)
+        system.add(540, ppid: zsh, comm: "node", args: ["npm exec http-server", "", "", ""], exe: nodeExe, cwd: "/tmp/x")
+        system.add(541, ppid: 540, comm: "sh", args: ["sh", "-c", "http-server"], exe: "/bin/sh", cwd: "/tmp/x")
+        system.add(542, ppid: 541, comm: "node", args: ["node", "/Users/me/.npm/_npx/1/node_modules/.bin/http-server"],
+                   exe: nodeExe, cwd: "/tmp/x")
+        let plan = system.plan(for: system.listener(542, project: nil, category: .service))
+        XCTAssertEqual(plan.root.pid, 540)
+        XCTAssertEqual(pids(plan.targets), [542, 541, 540])
+    }
+
+    func testPythonREPLModulesAreInteractiveSessions() {
+        let system = FakeSystem()
+        let zsh = addTerminalSession(system, base: 400)
+        system.add(580, ppid: zsh, comm: "Python", args: ["python3", "-m", "IPython"], exe: "/opt/homebrew/bin/python3",
+                   cwd: projectPath)
+        system.add(581, ppid: 580, comm: "sh", args: ["/bin/sh", "-c", "python3 -m http.server"], exe: "/bin/sh",
+                   cwd: projectPath)
+        system.add(582, ppid: 581, comm: "Python", args: ["python3", "-m", "http.server"], exe: "/opt/homebrew/bin/python3",
+                   cwd: projectPath)
+        let plan = system.plan(for: system.listener(582, ports: [8000]))
+        XCTAssertEqual(plan.root.pid, 582, "the IPython session is not part of the launch")
+        XCTAssertFalse(pids(plan.targets).contains(580))
+    }
+
+    func testPackageManagerAndScriptOperandHelpers() {
+        func details(_ args: [String], exe: String = nodeExe) -> (ProcessBasic, ProcessDetails) {
+            let basic = ProcessBasic(pid: 10, ppid: 1, pgid: 10, uid: userUID, comm: "node", startTime: 1)
+            return (basic, ProcessDetails(identity: basic.identity, executablePath: exe, arguments: args,
+                                          environment: [:], cwd: projectPath))
+        }
+        for args in [["npm run dev", "", ""], ["npm exec vite", ""], ["node", "/opt/homebrew/bin/npm", "start"],
+                     ["node", "/opt/homebrew/lib/node_modules/npm/bin/npm-cli.js", "run", "dev"],
+                     ["node", "/opt/homebrew/bin/pnpm", "dev"], ["node", "\(projectPath)/.yarn/releases/yarn-4.5.0.cjs", "dev"]] {
+            let (basic, info) = details(args)
+            XCTAssertTrue(KillPlanner.isPackageManagerProcess(basic, details: info), "\(args)")
+        }
+        for args in [["node", "server.js"], ["next-server (v15.0.3)", "", ""], ["node", "\(projectPath)/npm.js"],
+                     ["node", "/opt/homebrew/bin/qwen"]] {
+            let (basic, info) = details(args)
+            XCTAssertFalse(KillPlanner.isPackageManagerProcess(basic, details: info), "\(args)")
+        }
+        let (basic, nginx) = details(["nginx: master process", ""], exe: "/opt/homebrew/bin/nginx")
+        XCTAssertFalse(KillPlanner.isPackageManagerProcess(basic, details: nginx))
+
+        XCTAssertEqual(KillPlanner.scriptOperand(["node", "--watch", "-r", "ts-node/register", "src/a.ts"]), "src/a.ts")
+        XCTAssertEqual(KillPlanner.scriptOperand(["python3", "-u", "app.py", "--port", "1"]), "app.py")
+        XCTAssertNil(KillPlanner.scriptOperand(["python3", "-m", "uvicorn", "main:app"]))
+        XCTAssertNil(KillPlanner.scriptOperand(["node", "-e", "x"]))
+        XCTAssertNil(KillPlanner.scriptOperand(["node"]))
+        XCTAssertEqual(KillPlanner.scriptOperand(["bun", "run", "--hot", "src/index.ts"]), "src/index.ts")
+        XCTAssertNil(KillPlanner.scriptOperand(["bun", "run", "dev"]))
+        XCTAssertEqual(KillPlanner.scriptOperand(["java", "-Xmx1g", "-jar", "target/app.jar"]), "target/app.jar")
+        XCTAssertNil(KillPlanner.scriptOperand(["kimi"]))
+    }
+
+    // MARK: Watchers are stopped with their server (finding #5)
+
+    /// zsh → node --watch server.js → node server.js, in a folder that is not a project.
+    func testLooseNodeWatchRootsAtTheWatcher() {
+        let system = FakeSystem()
+        let zsh = addTerminalSession(system, base: 400)
+        system.add(600, ppid: zsh, comm: "node", args: ["node", "--watch", "server.js"], exe: nodeExe, cwd: "/tmp/loose")
+        system.add(601, ppid: 600, comm: "node", args: [nodeExe, "server.js"], exe: nodeExe, cwd: "/tmp/loose")
+        let plan = system.plan(for: system.listener(601, ports: [53444], project: nil, manager: .watcher(name: "node --watch"),
+                                                    category: .service))
+        XCTAssertEqual(plan.root.pid, 600)
+        XCTAssertEqual(pids(plan.targets), [601, 600])
+        XCTAssertFalse(pids(plan.targets).contains(zsh))
+    }
+
+    func testReloaderUnderAnAgentRootsAtTheReloaderNotTheAgent() {
+        let pythonExe = "/opt/homebrew/Cellar/python@3.13/3.13.1/Frameworks/Python.framework/Versions/3.13/Resources/Python.app/Contents/MacOS/Python"
+        let reloaders: [[String]] = [
+            ["/opt/homebrew/bin/python3.13", "/opt/homebrew/bin/uvicorn", "main:app", "--reload"],
+            ["/opt/homebrew/bin/python3.13", "-m", "flask", "run", "--debug"],
+            ["/opt/homebrew/bin/python3.13", "-m", "uvicorn", "main:app", "--reload"],
+        ]
+        for (info, cwd) in [(Optional(project), projectPath), (nil, "/tmp/api")] {
+            for reloader in reloaders {
+                let system = FakeSystem()
+                let zsh = addTerminalSession(system, base: 400)
+                system.add(610, ppid: zsh, comm: "kimi", args: ["kimi"], exe: "/Users/me/.kimi-code/bin/kimi", cwd: cwd)
+                system.add(611, ppid: 610, comm: "zsh", args: ["/bin/zsh", "-c", "uvicorn main:app --reload"],
+                           exe: "/bin/zsh", cwd: cwd)
+                system.add(612, ppid: 611, comm: "Python", args: reloader, exe: pythonExe, cwd: cwd)
+                system.add(613, ppid: 612, comm: "Python",
+                           args: ["/opt/homebrew/bin/python3.13", "-c", "from multiprocessing.spawn import spawn_main"],
+                           exe: pythonExe, cwd: cwd)
+                let plan = system.plan(for: system.listener(613, ports: [8000], project: info,
+                                                            category: info == nil ? .service : .project))
+                XCTAssertEqual(plan.root.pid, 612, "\(reloader) project=\(info != nil)")
+                XCTAssertEqual(pids(plan.targets), [613, 612], "\(reloader)")
+            }
+        }
+    }
+
+    // MARK: Manager daemons are never signalled (finding #9)
+
+    func testPM2DaemonListenerInClusterModeIsNeverSignalled() {
+        let system = FakeSystem()
+        system.add(620, ppid: 1, comm: "node", args: ["PM2 v5.4.3: God Daemon (/Users/me/.pm2)"], exe: nodeExe,
+                   cwd: "/Users/me")
+        system.add(621, ppid: 620, comm: "node", args: [nodeExe, "\(projectPath)/worker.js"], exe: nodeExe, cwd: projectPath)
+        system.add(622, ppid: 620, comm: "node", args: [nodeExe, "\(projectPath)/worker.js"], exe: nodeExe, cwd: projectPath)
+        let listener = system.listener(620, ports: [47125], project: nil, category: .service)
+
+        let plan = system.plan(for: listener)
+        XCTAssertTrue(plan.targets.isEmpty)
+        XCTAssertTrue(plan.warnings.first?.contains("PM2") == true, "\(plan.warnings)")
+        XCTAssertTrue(KillPlanner.singleProcessPlan(for: listener, currentUID: userUID, ownPID: harnessPID).targets.isEmpty)
+
+        // Even with a pm2 manager attached (a later attribution), the daemon itself is not a target.
+        let managed = system.listener(620, ports: [47125], project: nil, manager: .pm2(id: 0, name: "api"),
+                                      category: .service)
+        XCTAssertTrue(system.plan(for: managed).targets.isEmpty)
+    }
+
+    func testDockerBackendWithoutAContainerMatchIsNeverSignalled() throws {
+        let system = FakeSystem()
+        let backend = "/Applications/Docker.app/Contents/MacOS/com.docker.backend"
+        system.add(630, ppid: 1, comm: "com.docker.backe", args: [backend], exe: backend)
+        let listener = system.listener(630, ports: [47126], project: nil, category: .service)
+        let plan = system.plan(for: listener)
+        XCTAssertTrue(plan.targets.isEmpty)
+        XCTAssertTrue(plan.warnings.first?.contains("Docker") == true, "\(plan.warnings)")
+        XCTAssertTrue(KillPlanner.singleProcessPlan(for: listener, currentUID: userUID, ownPID: harnessPID).targets.isEmpty)
+        let backendProcess = try XCTUnwrap(system.table[630])
+        let launchd = try XCTUnwrap(system.table[1])
+        XCTAssertTrue(KillPlanner.isManagerDaemon(backendProcess, details: system.details(backendProcess)))
+        XCTAssertFalse(KillPlanner.isManagerDaemon(launchd, details: system.details(launchd)))
     }
 }
 
@@ -527,7 +789,7 @@ final class ControlComponentTests: XCTestCase {
             executablePath: "/Applications/PortPilot.app/Contents/MacOS/PortPilot",
             uid: 501,
             logFileURL: directory.appendingPathComponent("Logs/portpilot.log"),
-            bundleIdentifier: "app.portpilot.PortPilot",
+            bundleIdentifier: "eu.shhshm.PortPilot",
             ownPID: 4242,
             runCommand: { _, arguments in
                 calls.append(arguments)
@@ -541,22 +803,22 @@ final class ControlComponentTests: XCTestCase {
         XCTAssertTrue(manager.isEnabled)
         let data = try Data(contentsOf: manager.plistURL)
         let plist = try XCTUnwrap(PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any])
-        XCTAssertEqual(plist["Label"] as? String, "app.portpilot.agent")
+        XCTAssertEqual(plist["Label"] as? String, "eu.shhshm.PortPilot.agent")
         XCTAssertEqual(plist["ProgramArguments"] as? [String], ["/Applications/PortPilot.app/Contents/MacOS/PortPilot"])
         XCTAssertEqual(plist["RunAtLoad"] as? Bool, true)
         XCTAssertEqual((plist["KeepAlive"] as? [String: Bool])?["SuccessfulExit"], false)
         XCTAssertEqual(plist["ProcessType"] as? String, "Interactive")
         XCTAssertEqual(plist["LimitLoadToSessionType"] as? String, "Aqua")
         XCTAssertEqual(plist["StandardOutPath"] as? String, directory.appendingPathComponent("Logs/portpilot.log").path)
-        XCTAssertEqual(calls, [["enable", "gui/501/app.portpilot.agent"]], "enabling never bootstraps")
+        XCTAssertEqual(calls, [["enable", "gui/501/eu.shhshm.PortPilot.agent"]], "enabling never bootstraps")
 
         try manager.setEnabled(false)
         XCTAssertFalse(FileManager.default.fileExists(atPath: manager.plistURL.path))
         XCTAssertFalse(manager.isEnabled)
         XCTAssertEqual(calls.dropFirst().map { $0 }, [
-            ["disable", "gui/501/app.portpilot.agent"],
-            ["print", "gui/501/app.portpilot.agent"],
-            ["bootout", "gui/501/app.portpilot.agent"],
+            ["disable", "gui/501/eu.shhshm.PortPilot.agent"],
+            ["print", "gui/501/eu.shhshm.PortPilot.agent"],
+            ["bootout", "gui/501/eu.shhshm.PortPilot.agent"],
         ])
     }
 
@@ -624,5 +886,135 @@ final class ControlComponentTests: XCTestCase {
                                    manager: .none)
         XCTAssertEqual(Relauncher.resolveExecutable(for: record, environment: record.environment, workingDirectory: "/tmp"),
                        "/bin/sh")
+    }
+
+    // MARK: Login item: install.sh parity, cosmetic repairs, quit (findings #15, #17)
+
+    private func temporaryDirectory() -> URL {
+        FileManager.default.temporaryDirectory.appendingPathComponent("PortPilotTests-\(UUID().uuidString)",
+                                                                      isDirectory: true)
+    }
+
+    /// Runs scripts/install.sh's own `write_agent_plist` (with paths pointed at a temporary folder) and checks that
+    /// it writes exactly what LoginItemManager writes, so the app never rewrites the agent on first launch.
+    func testInstallScriptWritesTheSamePlistAsLoginItemManager() throws {
+        let repository = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+        let scriptURL = repository.appendingPathComponent("scripts/install.sh")
+        guard let script = try? String(contentsOf: scriptURL, encoding: .utf8) else {
+            throw XCTSkip("scripts/install.sh is not available next to the test sources")
+        }
+        let lines = script.components(separatedBy: "\n")
+        let start = try XCTUnwrap(lines.firstIndex(of: "write_agent_plist() {"))
+        let end = try XCTUnwrap(lines[start...].firstIndex(of: "}"))
+        let function = lines[start...end].joined(separator: "\n")
+
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let agents = directory.appendingPathComponent("LaunchAgents")
+        let logFile = directory.appendingPathComponent("Logs/portpilot.log")
+        let executable = "/Users/me/Applications/PortPilot.app/Contents/MacOS/PortPilot"
+        let harness = """
+        set -euo pipefail
+        die() { echo "$*" >&2; exit 1; }
+        BUNDLE_ID='eu.shhshm.PortPilot'
+        LABEL='\(LoginItemManager.label)'
+        EXECUTABLE='\(executable)'
+        AGENT_DIR='\(agents.path)'
+        AGENT_PLIST="$AGENT_DIR/$LABEL.plist"
+        LOG_DIR='\(logFile.deletingLastPathComponent().path)'
+        LOG_FILE='\(logFile.path)'
+        tmp_plist=""
+        \(function)
+        write_agent_plist
+        """
+        let result = Shell.run("/bin/bash", ["-c", harness], timeout: 20)
+        XCTAssertTrue(result.ok, result.message)
+
+        let manager = LoginItemManager(launchAgentsDirectory: agents, executablePath: executable, uid: 501,
+                                       logFileURL: logFile, bundleIdentifier: "eu.shhshm.PortPilot",
+                                       runCommand: { _, _ in ShellResult(status: 0, stdout: "", stderr: "") })
+        let data = try Data(contentsOf: manager.plistURL)
+        let written = try XCTUnwrap(PropertyListSerialization.propertyList(from: data, format: nil) as? NSDictionary)
+        XCTAssertEqual(written, NSDictionary(dictionary: manager.plistContents(for: executable)))
+        XCTAssertFalse(manager.needsRepair(installed: written as? [String: Any] ?? [:], executablePath: executable))
+    }
+
+    func testRepairIgnoresCosmeticDifferencesButFixesSemanticOnes() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let executable = "/Applications/PortPilot.app/Contents/MacOS/PortPilot"
+        let manager = LoginItemManager(launchAgentsDirectory: directory, executablePath: executable, uid: 501,
+                                       logFileURL: directory.appendingPathComponent("p.log"),
+                                       bundleIdentifier: "eu.shhshm.PortPilot",
+                                       runCommand: { _, _ in ShellResult(status: 0, stdout: "", stderr: "") })
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+
+        func install(_ change: (inout [String: Any]) -> Void) throws -> Data {
+            var contents = manager.plistContents(for: executable)
+            change(&contents)
+            let data = try PropertyListSerialization.data(fromPropertyList: contents, format: .binary, options: 0)
+            try data.write(to: manager.plistURL)
+            return data
+        }
+
+        // Cosmetic: no AssociatedBundleIdentifiers (older install.sh), other log path, binary format, extra key.
+        let cosmetic = try install { contents in
+            contents.removeValue(forKey: "AssociatedBundleIdentifiers")
+            contents["StandardOutPath"] = "/tmp/elsewhere.log"
+            contents["ThrottleInterval"] = 10
+        }
+        manager.repairIfNeeded()
+        XCTAssertEqual(try Data(contentsOf: manager.plistURL), cosmetic, "cosmetic differences never trigger a rewrite")
+
+        // Semantic: KeepAlive that would restart PortPilot after Quit, or a stale program path.
+        for change: (inout [String: Any]) -> Void in [{ $0["KeepAlive"] = true },
+                                                      { $0["ProgramArguments"] = ["/Old/PortPilot.app/Contents/MacOS/PortPilot"] },
+                                                      { $0["RunAtLoad"] = false },
+                                                      { $0.removeValue(forKey: "LimitLoadToSessionType") }] {
+            let stale = try install(change)
+            manager.repairIfNeeded()
+            let repaired = try Data(contentsOf: manager.plistURL)
+            XCTAssertNotEqual(repaired, stale)
+            let plist = try XCTUnwrap(PropertyListSerialization.propertyList(from: repaired, format: nil) as? NSDictionary)
+            XCTAssertEqual(plist, NSDictionary(dictionary: manager.plistContents(for: executable)))
+        }
+    }
+
+    func testQuitBootsOutOwnJobOnlyWhenLaunchAtLoginIsOff() {
+        var launched: [[String]] = []
+        func manager(serviceName: String?, printedPID: Int32?, loaded: Bool = true) -> LoginItemManager {
+            LoginItemManager(launchAgentsDirectory: URL(fileURLWithPath: "/nonexistent/eu.shhshm.PortPilot.tests"),
+                             executablePath: "/Applications/PortPilot.app/Contents/MacOS/PortPilot", uid: 501,
+                             logFileURL: URL(fileURLWithPath: "/nonexistent/eu.shhshm.PortPilot.tests/p.log"),
+                             bundleIdentifier: nil, ownPID: 4242,
+                             runCommand: { _, arguments in
+                                 XCTAssertEqual(arguments, ["print", "gui/501/\(LoginItemManager.label)"])
+                                 guard loaded else { return ShellResult(status: 113, stdout: "", stderr: "Could not find service") }
+                                 return ShellResult(status: 0, stdout: printedPID.map { "\tpid = \($0)\n" } ?? "", stderr: "")
+                             },
+                             environment: serviceName.map { ["XPC_SERVICE_NAME": $0] } ?? [:],
+                             launchDetached: { executable, arguments in
+                                 launched.append([executable] + arguments)
+                                 return true
+                             })
+        }
+
+        let job = manager(serviceName: LoginItemManager.label, printedPID: 4242)
+        XCTAssertTrue(job.isRunningAsAgentJob)
+        XCTAssertFalse(job.bootOutOwnJobIfDisabled(launchAtLogin: true), "toggle on: the agent stays")
+        XCTAssertTrue(launched.isEmpty)
+        XCTAssertTrue(job.bootOutOwnJobIfDisabled(launchAtLogin: false))
+        XCTAssertEqual(launched, [["/bin/launchctl", "bootout", "gui/501/\(LoginItemManager.label)"]])
+
+        launched.removeAll()
+        // Opened from Finder / Terminal: not the job, nothing to unload.
+        XCTAssertFalse(manager(serviceName: "application.eu.shhshm.PortPilot.1.2", printedPID: 777)
+            .bootOutOwnJobIfDisabled(launchAtLogin: false))
+        XCTAssertFalse(manager(serviceName: nil, printedPID: nil).bootOutOwnJobIfDisabled(launchAtLogin: false))
+        // The loaded job runs another process, or nothing is loaded: leave launchd alone.
+        XCTAssertFalse(manager(serviceName: LoginItemManager.label, printedPID: 777).bootOutOwnJobIfDisabled(launchAtLogin: false))
+        XCTAssertFalse(manager(serviceName: LoginItemManager.label, printedPID: nil, loaded: false)
+            .bootOutOwnJobIfDisabled(launchAtLogin: false))
+        XCTAssertTrue(launched.isEmpty)
     }
 }

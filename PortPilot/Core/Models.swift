@@ -119,8 +119,17 @@ struct ProcessDetails: Sendable {
     }
 
     /// argv joined with spaces, arguments containing spaces are quoted.
-    var commandLine: String {
-        arguments.map { arg in
+    ///
+    /// Trailing empty arguments are dropped: processes that rewrite their title (nginx, redis, PM2 via
+    /// setproctitle) leave blank argv slots behind, which would otherwise show up as `"" ""` noise.
+    /// Empty arguments in the middle are kept (quoted) because they are meaningful there.
+    var commandLine: String { Self.commandLine(for: arguments) }
+
+    /// Shared formatting for `commandLine` (also used by `StoppedRecord`).
+    static func commandLine(for arguments: [String]) -> String {
+        var shown = arguments[...]
+        while shown.count > 1, shown.last?.isEmpty == true { shown = shown.dropLast() }
+        return shown.map { arg in
             arg.contains(" ") || arg.isEmpty ? "\"\(arg)\"" : arg
         }.joined(separator: " ")
     }
@@ -285,8 +294,29 @@ struct ListenerProcess: Identifiable, Sendable {
     let appName: String?
     /// True when we could not read details (other user / permission).
     let isRestricted: Bool
+    /// Distinct ports of `sockets`, ascending. Computed once: sorting and the UI read it many times per tick.
+    let ports: [UInt16]
 
-    var ports: [UInt16] { Array(Set(sockets.map(\.port))).sorted() }
+    init(basic: ProcessBasic, details: ProcessDetails?, sockets: [ListeningSocket], usage: ResourceUsage,
+         treeUsage: ResourceUsage, category: ListenerCategory, project: ProjectInfo?, displayName: String,
+         frameworks: [String], origin: LaunchOrigin?, manager: ProcessManager, appName: String?,
+         isRestricted: Bool) {
+        self.basic = basic
+        self.details = details
+        self.sockets = sockets
+        self.usage = usage
+        self.treeUsage = treeUsage
+        self.category = category
+        self.project = project
+        self.displayName = displayName
+        self.frameworks = frameworks
+        self.origin = origin
+        self.manager = manager
+        self.appName = appName
+        self.isRestricted = isRestricted
+        self.ports = Array(Set(sockets.map(\.port))).sorted()
+    }
+
     var commandLine: String { details?.commandLine ?? basic.comm }
     var isExposedToNetwork: Bool { sockets.contains { $0.isExposed } }
 }
@@ -300,12 +330,37 @@ struct ListenerGroup: Identifiable, Sendable {
     let title: String
     /// Secondary line, e.g. "frontend · Vite" or a shortened command.
     let subtitle: String?
-    /// Folder to reveal in Finder (project root / cwd / app bundle).
+    /// Folder to reveal in Finder (project root / cwd / app bundle). Always a directory, never a file.
     let path: String?
-    var processes: [ListenerProcess]
+    var processes: [ListenerProcess] {
+        didSet { ports = Self.distinctPorts(of: processes) }
+    }
+    /// CPU/memory of processes that Stop also ends but that belong to no listener's own tree: the runner that
+    /// launched the servers (`npm run dev`, `sh -c`, nodemon) and its other children (workers, `tsc -w`).
+    /// Each such process is counted in at most one group.
+    var extraUsage: ResourceUsage
+    /// Distinct ports of all processes, ascending. Kept up to date when `processes` changes.
+    private(set) var ports: [UInt16]
 
-    var ports: [UInt16] { Array(Set(processes.flatMap(\.ports))).sorted() }
-    var usage: ResourceUsage { processes.reduce(.zero) { $0 + $1.treeUsage } }
+    init(id: String, category: ListenerCategory, title: String, subtitle: String?, path: String?,
+         processes: [ListenerProcess], extraUsage: ResourceUsage = .zero) {
+        self.id = id
+        self.category = category
+        self.title = title
+        self.subtitle = subtitle
+        self.path = path
+        self.processes = processes
+        self.extraUsage = extraUsage
+        self.ports = Self.distinctPorts(of: processes)
+    }
+
+    private static func distinctPorts(of processes: [ListenerProcess]) -> [UInt16] {
+        if processes.count == 1 { return processes[0].ports }
+        return Array(Set(processes.flatMap(\.ports))).sorted()
+    }
+
+    /// Everything Stop ends: each listener with its own tree, plus `extraUsage`.
+    var usage: ResourceUsage { processes.reduce(extraUsage) { $0 + $1.treeUsage } }
     /// The manager that matters most for Stop: an auto-restarting one (launchd/pm2/Docker) beats a watcher.
     var manager: ProcessManager {
         processes.lazy.map(\.manager).first { $0.isAutoRestarting }
@@ -409,9 +464,7 @@ struct StoppedRecord: Identifiable, Sendable {
     let executablePath: String?
     let manager: ProcessManager
 
-    var commandLine: String {
-        arguments.map { $0.contains(" ") ? "\"\($0)\"" : $0 }.joined(separator: " ")
-    }
+    var commandLine: String { ProcessDetails.commandLine(for: arguments) }
     /// launchd/pm2/docker items are restarted through their manager instead.
     var canRelaunch: Bool {
         guard !arguments.isEmpty else { return false }
@@ -443,6 +496,8 @@ struct AppSettings: Codable, Equatable, Sendable {
     var heavyCPUThreshold: Double = 80
     /// Memory above which a group is highlighted as heavy.
     var heavyMemoryBytes: UInt64 = 1_500_000_000
+    /// Ask GitHub once a day whether a newer release exists (the app's only network request).
+    var checkForUpdates: Bool = true
 
     enum SortOrder: String, Codable, CaseIterable, Sendable, Identifiable {
         case port, name, cpu, memory, newest
@@ -461,14 +516,43 @@ struct AppSettings: Codable, Equatable, Sendable {
     static let refreshChoices: [Double] = [1, 2, 3, 5, 10, 30]
 }
 
+extension AppSettings {
+    /// Decodes stored settings, backward and forward compatible: fields missing from `data` (settings saved by an
+    /// older version) and fields whose stored value no longer decodes keep their defaults, and unknown keys are
+    /// ignored. Synthesized decoding would reject the whole value instead and reset every setting.
+    /// nil when `data` isn't a JSON object.
+    static func decoded(from data: Data) -> AppSettings? {
+        guard let stored = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let defaultsData = try? JSONEncoder().encode(AppSettings()),
+              let defaults = (try? JSONSerialization.jsonObject(with: defaultsData)) as? [String: Any]
+        else { return nil }
+        let known = stored.filter { defaults[$0.key] != nil }
+        func decode(_ object: [String: Any]) -> AppSettings? {
+            guard let merged = try? JSONSerialization.data(withJSONObject: object) else { return nil }
+            return try? JSONDecoder().decode(AppSettings.self, from: merged)
+        }
+        if let settings = decode(defaults.merging(known) { _, stored in stored }) { return settings }
+        // Some stored value is invalid: keep every value that decodes on its own.
+        var object = defaults
+        for (key, value) in known.sorted(by: { $0.key < $1.key }) {
+            var candidate = object
+            candidate[key] = value
+            if decode(candidate) != nil { object = candidate }
+        }
+        return decode(object)
+    }
+}
+
 // MARK: - Banners (transient feedback in the panel)
 
 struct Banner: Identifiable, Equatable, Sendable {
     enum Style: Sendable { case info, success, warning, error }
     enum Action: Equatable, Sendable {
-        /// Offer to stop the respawned job and disable its auto-start.
-        case disableAutoStart(groupID: String)
-        case relaunch(recordID: UUID)
+        /// Offer to stop the respawned job and disable its auto-start. `launchdLabels`: the launchd jobs a Stop just
+        /// unloaded, so the action still works after their group has left the list.
+        case disableAutoStart(groupID: String, launchdLabels: [String] = [])
+        /// Relaunch what a Stop ended (Undo): `recordID` plus, when that Stop ended several servers, the others.
+        case relaunch(recordID: UUID, moreRecordIDs: [UUID] = [])
     }
     let id: UUID
     let style: Style
@@ -514,11 +598,30 @@ enum Format {
         return h % 24 == 0 ? "\(d)d" : "\(d)d \(h % 24)h"
     }
 
-    /// Replaces the home directory prefix with "~".
+    /// Replaces the home directory prefix (`displayHome`) with "~".
     static func abbreviatePath(_ path: String) -> String {
-        let home = NSHomeDirectory()
+        let home = displayHome
         if path == home { return "~" }
         if path.hasPrefix(home + "/") { return "~" + path.dropFirst(home.count) }
         return path
     }
+
+    /// The folder shown as "~": the user's home, unless demo data substituted its fictional one (see
+    /// `setDisplayHome(_:)`). Thread-safe.
+    static var displayHome: String {
+        displayHomeLock.lock()
+        defer { displayHomeLock.unlock() }
+        return displayHomeOverride ?? NSHomeDirectory()
+    }
+
+    /// Makes paths under `home` display as "~/…" instead of paths under the real home; nil restores the real home.
+    /// Only demo and preview data (`PreviewData`) call this, so screenshots never show the real user name.
+    static func setDisplayHome(_ home: String?) {
+        displayHomeLock.lock()
+        displayHomeOverride = home
+        displayHomeLock.unlock()
+    }
+
+    private static let displayHomeLock = NSLock()
+    private static var displayHomeOverride: String?
 }

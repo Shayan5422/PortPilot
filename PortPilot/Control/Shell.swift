@@ -36,11 +36,14 @@ enum Shell {
     /// full pipe) but discarded.
     static let maxCapturedBytes = 8 * 1024 * 1024
 
-    /// Directories always appended to the login-shell PATH (SPEC), `~` expanded.
+    /// Directories always appended to the login-shell PATH (SPEC), `~` expanded. Includes where Docker Desktop
+    /// ("user" CLI install) and OrbStack put the `docker` CLI, so published container ports are attributed to their
+    /// container even when the user's shell PATH doesn't list those folders.
     static var extraToolDirectories: [String] {
         let home = NSHomeDirectory()
         return ["/opt/homebrew/bin", "/usr/local/bin", home + "/.bun/bin", home + "/.local/bin",
-                home + "/.cargo/bin", home + "/.deno/bin"]
+                home + "/.cargo/bin", home + "/.deno/bin", home + "/.docker/bin", home + "/.orbstack/bin",
+                "/Applications/Docker.app/Contents/Resources/bin"]
     }
 
     /// Last-resort system directories so lookups work even if every other source is empty.
@@ -291,8 +294,16 @@ private final class PipeDrain: @unchecked Sendable {
     /// Signalled exactly once, from the cancel handler (after EOF, a read error or `collect`).
     private let finished = DispatchSemaphore(value: 0)
 
-    private static let queue = DispatchQueue(label: "app.portpilot.shell.pipes", qos: .utility,
-                                             attributes: .concurrent)
+    private static let utilityQueue = DispatchQueue(label: "eu.shhshm.PortPilot.shell.pipes", qos: .utility,
+                                                    attributes: .concurrent)
+    private static let userInitiatedQueue = DispatchQueue(label: "eu.shhshm.PortPilot.shell.pipes.user",
+                                                          qos: .userInitiated, attributes: .concurrent)
+
+    /// The readers run at the caller's priority: a button action (user-initiated) never waits on utility-QoS
+    /// readers (a priority inversion), while background scans keep theirs at utility.
+    private static var queueForCurrentThread: DispatchQueue {
+        qos_class_self().rawValue > QOS_CLASS_UTILITY.rawValue ? userInitiatedQueue : utilityQueue
+    }
 
     init(pipe: Pipe, limit: Int) {
         self.limit = limit
@@ -300,7 +311,7 @@ private final class PipeDrain: @unchecked Sendable {
         let flags = fcntl(fd, F_GETFL)
         if flags >= 0 { _ = fcntl(fd, F_SETFL, flags | O_NONBLOCK) }
 
-        source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: Self.queue)
+        source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: Self.queueForCurrentThread)
         let finished = self.finished
         source.setEventHandler { [unowned self] in self.drain(fd) }
         source.setCancelHandler {

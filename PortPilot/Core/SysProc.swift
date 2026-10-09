@@ -317,6 +317,8 @@ enum SysProc {
     private static let zombieState = Int8(SZOMB)                    // 5
 
     private static let maxProcessTableAttempts = 8
+    /// PROC_PIDLISTFDS attempts before settling for a possibly truncated descriptor list.
+    static let maxDescriptorListAttempts = 4
     /// PROC_PIDPATHINFO_MAXSIZE (4 * MAXPATHLEN) is a macro Swift cannot import.
     private static let pidPathBufferSize = 4 * Int(MAXPATHLEN)
     /// Upper bound on PROCARGS2 data (kern.argmax), queried once.
@@ -355,32 +357,48 @@ enum SysProc {
 
     /// Fills `buffer` with the process's descriptor table and returns the number of valid
     /// entries, or nil when the process cannot be inspected.
+    private static func listFileDescriptors(pid: Int32, into buffer: inout [proc_fdinfo]) -> Int? {
+        listFileDescriptors(into: &buffer,
+                            list: { raw in proc_pidinfo(pid, PROC_PIDLISTFDS, 0, raw.baseAddress, Int32(clamping: raw.count)) },
+                            probe: { probeFileDescriptorBytes(pid: pid) })
+    }
+
+    /// The retry logic of `listFileDescriptors(pid:into:)`, with the two libproc calls injected for tests.
     ///
     /// PROC_PIDLISTFDS silently truncates to the buffer size, so a completely filled buffer is
     /// treated as "maybe truncated": the needed size is probed (nil buffer → bytes needed, which
-    /// already includes kernel slack), the buffer grows, and the call is retried.
-    private static func listFileDescriptors(pid: Int32, into buffer: inout [proc_fdinfo]) -> Int? {
+    /// already includes kernel slack), the buffer grows, and the call is retried. If the table keeps
+    /// outgrowing the buffer (fd storm), the entries written by the last attempt are used as they are:
+    /// the buffer is never regrown without being refilled.
+    ///
+    /// - Parameters:
+    ///   - list: PROC_PIDLISTFDS into the given bytes; returns bytes written (≤ 0 with errno on failure).
+    ///   - probe: bytes needed for the whole table, nil when the process cannot be inspected.
+    static func listFileDescriptors(into buffer: inout [proc_fdinfo],
+                                    list: (UnsafeMutableRawBufferPointer) -> Int32,
+                                    probe: () -> Int?) -> Int? {
         let entrySize = MemoryLayout<proc_fdinfo>.stride
         if buffer.isEmpty {
-            guard let needed = probeFileDescriptorBytes(pid: pid) else { return nil }
+            guard let needed = probe() else { return nil }
             buffer = [proc_fdinfo](repeating: proc_fdinfo(), count: needed / entrySize + 32)
         }
-        for _ in 0..<4 {
+        for attempt in 0..<maxDescriptorListAttempts {
             errno = 0
-            let written = buffer.withUnsafeMutableBytes { raw in
-                proc_pidinfo(pid, PROC_PIDLISTFDS, 0, raw.baseAddress, Int32(clamping: raw.count))
-            }
+            let written = buffer.withUnsafeMutableBytes { list($0) }
             // libproc returns 0 both for "no descriptors" and for errors; errno tells them apart.
             if written <= 0 { return errno == 0 && written == 0 ? 0 : nil }
-            let count = Int(written) / entrySize
-            if count < buffer.count { return count }
+            let count = min(Int(written) / entrySize, buffer.count)
+            // Not full: complete. Full on the last attempt: use what was just written (possibly truncated)
+            // rather than failing.
+            if count < buffer.count || attempt == maxDescriptorListAttempts - 1 { return count }
 
-            guard let needed = probeFileDescriptorBytes(pid: pid) else { return nil }
+            guard let needed = probe() else { return nil }
             let grown = max(needed / entrySize + 64, buffer.count * 2)
             buffer = [proc_fdinfo](repeating: proc_fdinfo(), count: grown)
         }
-        // Still growing after several attempts (fd storm): use what fits rather than failing.
-        return buffer.count
+        // Unreachable (the last attempt always returns). Failing safe makes the scan treat the pid as
+        // uninspected instead of reporting "no sockets" from an unfilled buffer.
+        return nil
     }
 
     private static func probeFileDescriptorBytes(pid: Int32) -> Int? {
@@ -402,6 +420,15 @@ enum SysProc {
         let inet = tcp.tcpsi_ini
         // insi_lport holds a network-order 16-bit port in an int.
         let port = UInt16(bigEndian: UInt16(truncatingIfNeeded: inet.insi_lport))
+
+        // An AF_INET6 socket bound to a v4-mapped address (::ffff:127.0.0.1, what Java NIO does for
+        // "127.0.0.1") becomes a plain IPv4 PCB: the kernel clears INI_IPV6 and stores the address in the
+        // in4in6 form (12 zero bytes + IPv4), which ipv4Mapped() below would not recognise. The version
+        // flags are authoritative, so they win over the socket family.
+        if isIPv4Only(vflag: inet.insi_vflag) {
+            return ListeningSocket(port: port, address: render(ipv4: inet.insi_laddr.ina_46.i46a_addr4),
+                                   family: .ipv4, pid: pid)
+        }
 
         let isIPv6: Bool
         switch info.psi.soi_family {
@@ -430,6 +457,7 @@ enum SysProc {
 
         static let inpcbSize = 104                    // struct xinpcb_n
         static let inpcbLocalPort = 18                // u_short inp_lport (network order)
+        static let inpcbVersionFlag = 44              // u_char inp_vflag (INP_IPV4 0x1, INP_IPV6 0x2), after inp_flow
         static let inpcbLocalAddress = 64             // union { in_addr_4in6; in6_addr } inp_dependladdr
         static let inpcbLocalIPv4 = 64 + 12           // in_addr_4in6.ia46_addr4
 
@@ -451,7 +479,10 @@ enum SysProc {
         let port = UInt16(bigEndian: rawPort)
 
         let family = buffer.loadUnaligned(fromByteOffset: socket + PCBLayout.socketFamily, as: Int32.self)
-        if family == AF_INET6 {
+        // Same rule as listeningSocket(pid:fd:scratch:): an IPv4-only PCB on an AF_INET6 socket holds its
+        // address in the in4in6 form, so the version flag decides how to read it.
+        let versionFlag = buffer[inpcb + PCBLayout.inpcbVersionFlag]
+        if family == AF_INET6, !isIPv4Only(vflag: versionFlag) {
             var address = in6_addr()
             withUnsafeMutableBytes(of: &address) { out in
                 out.copyMemory(from: UnsafeRawBufferPointer(
@@ -484,6 +515,12 @@ enum SysProc {
             if errno != ENOMEM { return nil }
         }
         return nil
+    }
+
+    /// True when a PCB's version flags (insi_vflag / inp_vflag) say it is IPv4 only. Such a PCB keeps its
+    /// local address in the in4in6 form whatever the socket family is.
+    private static func isIPv4Only(vflag: UInt8) -> Bool {
+        vflag & inetVersion4 != 0 && vflag & inetVersion6 == 0
     }
 
     /// The embedded IPv4 address of a v4-mapped IPv6 address (::ffff:a.b.c.d), else nil.

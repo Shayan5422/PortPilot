@@ -175,53 +175,70 @@ enum Classifier {
         guard let details = ancestorDetails(ancestor.pid) else { return nil }
         let command = CommandAnalysis(details: details, comm: comm)
         if command.processTitle?.hasPrefix("PM2") == true { return LaunchOrigin(kind: .pm2, name: "PM2") }
-        if command.runtime != nil, let agent = agentOrigin(forCommandLine: command.argv) { return agent }
-        if let agent = agentOrigin(forExecutableName: command.exeName) { return agent }
+        if let agent = agentOrigin(for: command) { return agent }
 
         let exePath = details.executablePath ?? ""
-        guard isApplicationExecutable(exePath), let bundle = appBundle(forExecutable: exePath) else { return nil }
+        // Toolchain binaries inside Xcode.app/Contents/Developer (make, git, swift — what the /usr/bin shims exec
+        // into) are build tools, not the Xcode IDE: look further up for who ran them.
+        guard isApplicationExecutable(exePath), !exePath.contains(".app/Contents/Developer/"),
+              let bundle = appBundle(forExecutable: exePath) else { return nil }
         let folder = (bundle.bundlePath as NSString).lastPathComponent.replacingOccurrences(of: ".app", with: "")
         if let known = knownAppOrigin(folderName: folder) { return known }
         if isSystemExecutable(exePath) { return nil }
         return LaunchOrigin(kind: .app, name: bundle.name)
     }
 
+    /// AI coding agent CLI or agent host known by its executable / argv[0] / p_comm name.
     private static func agentOrigin(forExecutableName name: String) -> LaunchOrigin? {
-        switch name.lowercased() {
-        case "claude":
-            // "claude" is the Claude Code CLI; the desktop app is "Claude" (capitalised).
-            return name == "claude" ? LaunchOrigin(kind: .claudeCode, name: "Claude Code") : nil
-        case "codex": return LaunchOrigin(kind: .codex, name: "Codex")
-        case "gemini": return LaunchOrigin(kind: .aiAgent, name: "Gemini CLI")
-        case "aider": return LaunchOrigin(kind: .aiAgent, name: "Aider")
-        case "opencode": return LaunchOrigin(kind: .aiAgent, name: "opencode")
-        case "goose": return LaunchOrigin(kind: .aiAgent, name: "Goose")
-        case "amp": return LaunchOrigin(kind: .aiAgent, name: "Amp")
-        case "cursor-agent": return LaunchOrigin(kind: .aiAgent, name: "Cursor Agent")
-        case "crush": return LaunchOrigin(kind: .aiAgent, name: "Crush")
-        case "qwen": return LaunchOrigin(kind: .aiAgent, name: "Qwen Code")
-        case "droid": return LaunchOrigin(kind: .aiAgent, name: "Droid")
-        default: return nil
-        }
+        let key = name.lowercased()
+        // "claude" is the Claude Code CLI; the desktop app is "Claude" (capitalised).
+        if key == "claude" { return name == "claude" ? agentCLINames[key] : nil }
+        return agentCLINames[key]
     }
 
-    /// Agents distributed as node/python scripts show up as "node .../claude-code/cli.js" etc.
-    private static func agentOrigin(forCommandLine argv: [String]) -> LaunchOrigin? {
-        for argument in argv.prefix(3) {
-            let lower = argument.lowercased()
-            if lower.contains("claude-code") || lower.hasSuffix("/bin/claude") || lower.contains("@anthropic-ai/claude") {
-                return LaunchOrigin(kind: .claudeCode, name: "Claude Code")
-            }
-            if lower.contains("@openai/codex") || lower.hasSuffix("/bin/codex") {
-                return LaunchOrigin(kind: .codex, name: "Codex")
-            }
-            if lower.contains("gemini-cli") || lower.hasSuffix("/bin/gemini") {
-                return LaunchOrigin(kind: .aiAgent, name: "Gemini CLI")
-            }
-            if lower.hasSuffix("/bin/aider") { return LaunchOrigin(kind: .aiAgent, name: "Aider") }
-            if lower.contains("opencode") { return LaunchOrigin(kind: .aiAgent, name: "opencode") }
+    /// Recognises a coding agent from its full command line, so it is found however it was installed:
+    /// - a native binary or a renamed process title (`kimi`, `codex app-server`, argv[0] "claude");
+    /// - an install location (`~/.kimi-code/…`, `~/.local/share/claude/versions/…`);
+    /// - a runtime running an agent package or CLI shim: `node …/node_modules/@google/gemini-cli/dist/index.js`,
+    ///   `node /opt/homebrew/bin/qwen`, `python ~/.local/bin/aider`, `python -m aider`.
+    /// Plain project scripts never match: a name only counts for an installed shim (a `bin` folder or no file
+    /// extension), and package paths only count inside `node_modules`.
+    private static func agentOrigin(for command: CommandAnalysis) -> LaunchOrigin? {
+        if let agent = agentOrigin(forExecutableName: command.exeName) { return agent }
+        if command.processTitle == nil, let argv0 = command.argv.first, !argv0.isEmpty,
+           let agent = agentOrigin(forExecutableName: lastPathComponent(argv0)) {
+            return agent
         }
-        return nil
+        if let agent = agentOrigin(forInstallPath: command.exePath) { return agent }
+        guard command.runtime != nil else { return nil }
+        if let module = command.module?.lowercased(),
+           let agent = agentPythonModules[String(module.split(separator: ".").first ?? Substring(module))] {
+            return agent
+        }
+        // bun/deno take subcommands, so their script may be a bare path without an extension.
+        guard let script = command.script ?? command.positionals.first, !script.isEmpty else { return nil }
+        if let agent = agentOrigin(forInstallPath: script) { return agent }
+        guard isInstalledCLIShim(script) else { return nil }
+        let base = lastPathComponent(script).lowercased()
+        let stem = base.split(separator: ".", maxSplits: 1).first.map(String.init) ?? base
+        return agentOrigin(forExecutableName: stem) ?? agentScriptOnlyNames[stem]
+    }
+
+    /// Agent packages and install folders inside a script or executable path.
+    private static func agentOrigin(forInstallPath path: String) -> LaunchOrigin? {
+        guard path.contains("/") else { return nil }
+        let lower = path.lowercased()
+        return agentPathMarkers.first { lower.contains($0.marker) }?.origin
+    }
+
+    /// A CLI entry point as package managers install it: in a `bin`/`.bin` folder (`/opt/homebrew/bin/qwen`,
+    /// `node_modules/.bin/gemini`, `.venv/bin/aider`) or an extension-less executable script.
+    private static func isInstalledCLIShim(_ script: String) -> Bool {
+        let base = lastPathComponent(script)
+        guard !base.isEmpty else { return false }
+        let directory = lastPathComponent(String(script.dropLast(base.count)).trimmingCharacters(in: ["/"]))
+        if directory == "bin" || directory == ".bin" { return true }
+        return !base.contains(".")
     }
 
     private static func knownAppOrigin(folderName: String) -> LaunchOrigin? {
@@ -308,6 +325,21 @@ enum Classifier {
         return nil
     }
 
+    /// True when this process itself is a file watcher / reloader that restarts its child (nodemon, node --watch,
+    /// uvicorn --reload, the Flask/Django reloader parent, cargo watch…). The kill planner climbs to such a parent
+    /// even without a project, otherwise it would restart the server on the next file change.
+    /// The environment is ignored on purpose: `WERKZEUG_RUN_MAIN` marks the reloaded child, not the reloader.
+    /// supervisord is not one: it runs many unrelated programs, so stopping one server must never take it down.
+    static func isWatcherProcess(basic: ProcessBasic, details: ProcessDetails?) -> Bool {
+        guard details != nil else { return false }
+        let command = CommandAnalysis(details: details, comm: basic.comm)
+        guard let signature = watcherSignature(command, environment: [:]) else { return false }
+        return !multiProgramSupervisors.contains(signature)
+    }
+
+    /// Process supervisors that run many programs at once (not one watched server).
+    private static let multiProgramSupervisors: Set<String> = ["supervisord"]
+
     private static func watcherSignature(_ command: CommandAnalysis, environment: [String: String]) -> String? {
         let tool = command.toolKey ?? command.exeKey
         let options = command.interpreterOptions
@@ -386,16 +418,14 @@ enum Classifier {
         let command = CommandAnalysis(details: details, comm: basic.comm)
         let name = command.exeKey
 
-        if agentOrigin(forExecutableName: command.exeName) != nil || agentOrigin(forExecutableName: basic.comm) != nil {
-            return true
-        }
+        // AI coding agents and agent hosts (native, node/bun/python packages, CLI shims, renamed titles).
+        if agentOrigin(forExecutableName: basic.comm) != nil || agentOrigin(for: command) != nil { return true }
         if boundaryExecutables.contains(name) || boundaryExecutables.contains(basic.comm.lowercased()) { return true }
         if name == "ssh" { return !command.args.contains("-N") }   // `ssh -N -L ...` is a tunnel, not a session
         if shellNames.contains(normalizedShellName(name)) {
             return details == nil || isInteractiveShell(command)
         }
         if command.processTitle?.hasPrefix("PM2") == true { return true }
-        if command.runtime != nil, agentOrigin(forCommandLine: command.argv) != nil { return true }
         if dockerBackendExecutables.contains(command.exeName) || command.exeName.hasPrefix("com.docker.") { return true }
         if name == "portpilot" || command.exePath.contains("/PortPilot.app/") { return true }
 
@@ -419,20 +449,27 @@ enum Classifier {
         let command = CommandAnalysis(details: details, comm: basic.comm)
         let name = command.exeKey
         if runnerExecutables.contains(name) { return true }
+        // A shim can exec a differently named binary: Apple's /usr/bin/make runs Xcode's `gnumake` with argv[0]
+        // still "…/make".
+        if command.processTitle == nil, let argv0 = command.argv.first,
+           runnerExecutables.contains(lastPathComponent(argv0).lowercased()) {
+            return true
+        }
         let first = command.positionals.first
         switch name {
         case "cargo": return first == "run" || first == "watch"
         case "uv", "poetry", "pipenv", "hatch", "pdm", "rye": return first == "run"
         default: break
         }
+        // npm rewrites its argv with a process title ("npm run dev", "npm exec vite") once it has started.
+        if command.runtime == "node" || command.runtime == "bun", let title = command.processTitle,
+           let first = title.split(separator: " ").first, packageManagerNames.contains(String(first)) {
+            return true
+        }
         switch command.runtime {
         case "node":
             if let package = command.package, runnerPackages.contains(package) { return true }
-            if let script = command.script,
-               ["npm-cli.js", "npx-cli.js", "yarn.js", "yarn.cjs", "pnpm.cjs", "pnpm.mjs", "pnpx.cjs"]
-                .contains((script as NSString).lastPathComponent) {
-                return true
-            }
+            if let script = command.script, isPackageManagerScript(script) { return true }
         case "python":
             if let tool = command.toolKey {
                 if ["poetry", "pipenv", "hatch", "pdm"].contains(tool) { return command.rest.first == "run" }
@@ -443,13 +480,36 @@ enum Classifier {
                 if tool == "bundle" { return command.rest.first == "exec" }
                 if ["foreman", "overmind"].contains(tool) { return true }
             }
-        case "bun": return first == "run" || first == "x" || first == "exec"
+        case "bun":
+            guard let first else { return false }
+            if first == "run" || first == "x" || first == "exec" { return true }
+            // `bun dev` runs the package.json script "dev"; a file operand (`bun server.ts`) is the program itself.
+            return !bunCommands.contains(first) && !first.contains("/") && !first.contains(".")
         case "deno": return first == "task"
         case "go": return first == "run"
         case "dotnet": return first == "run" || first == "watch"
         default: break
         }
         return false
+    }
+
+    /// A package manager's entry script as run by node: the bin shim (`/opt/homebrew/bin/npm`, `…/bin/pnpm`),
+    /// its real file (`npm-cli.js`, `pnpm.cjs`, `yarn.js`) or a Yarn Berry release (`.yarn/releases/yarn-4.5.0.cjs`).
+    static func isPackageManagerScript(_ script: String) -> Bool {
+        let base = lastPathComponent(script).lowercased()
+        if ["npm-cli.js", "npx-cli.js", "yarn.js", "yarn.cjs", "pnpm.cjs", "pnpm.mjs", "pnpx.cjs", "pnpx.mjs"]
+            .contains(base) {
+            return true
+        }
+        if base.hasPrefix("yarn-"), base.hasSuffix(".cjs") || base.hasSuffix(".js") { return true }
+        // Corepack's entry points (`…/corepack/dist/pnpm.js`) load the real package manager in the same process.
+        if script.lowercased().contains("/corepack/"),
+           let stem = base.split(separator: ".", maxSplits: 1).first.map(String.init),
+           packageManagerNames.contains(stem) {
+            return true
+        }
+        // Extension-less shims only: a project's own `npm.js` or `yarn.ts` is not a package manager.
+        return !base.contains(".") && packageManagerNames.contains(base)
     }
 
     /// `sh/bash/zsh -c …` or a shell running a script file — not attached to a terminal.
@@ -528,6 +588,82 @@ enum Classifier {
         "mongod": "MongoDB", "ollama": "Ollama", "cloudflared": "cloudflared", "ngrok": "ngrok",
     ]
 
+    // MARK: Agents
+
+    /// AI coding agent CLIs and agent hosts, by executable / argv[0] / CLI shim name (lowercased).
+    private static let agentCLINames: [String: LaunchOrigin] = {
+        let claude = LaunchOrigin(kind: .claudeCode, name: "Claude Code")
+        let codex = LaunchOrigin(kind: .codex, name: "Codex")
+        func agent(_ name: String) -> LaunchOrigin { LaunchOrigin(kind: .aiAgent, name: name) }
+        return [
+            "claude": claude, "codex": codex,
+            "gemini": agent("Gemini CLI"), "qwen": agent("Qwen Code"), "kimi": agent("Kimi"),
+            "aider": agent("Aider"), "opencode": agent("opencode"), "crush": agent("Crush"), "goose": agent("Goose"),
+            "amp": agent("Amp"), "cursor-agent": agent("Cursor Agent"), "copilot": agent("Copilot CLI"),
+            "droid": agent("Droid"), "cline": agent("Cline"), "openhands": agent("OpenHands"),
+            "plandex": agent("Plandex"), "pdx": agent("Plandex"), "auggie": agent("Auggie"),
+            "kilocode": agent("Kilo Code"), "kilo": agent("Kilo Code"), "codebuff": agent("Codebuff"),
+            "grok": agent("Grok CLI"), "openclaw": agent("OpenClaw"),
+        ]
+    }()
+
+    /// Agent CLIs whose names are too generic to trust as a native executable; they only count as an installed
+    /// CLI shim run by a runtime (`node /opt/homebrew/bin/cn`, `python ~/.local/bin/interpreter`).
+    private static let agentScriptOnlyNames: [String: LaunchOrigin] = [
+        "cn": LaunchOrigin(kind: .aiAgent, name: "Continue"),
+        "interpreter": LaunchOrigin(kind: .aiAgent, name: "Open Interpreter"),
+    ]
+
+    /// Path fragments (lowercased) of agent packages and install folders.
+    private static let agentPathMarkers: [(marker: String, origin: LaunchOrigin)] = {
+        let claude = LaunchOrigin(kind: .claudeCode, name: "Claude Code")
+        let codex = LaunchOrigin(kind: .codex, name: "Codex")
+        func agent(_ name: String) -> LaunchOrigin { LaunchOrigin(kind: .aiAgent, name: name) }
+        return [
+            ("/node_modules/@anthropic-ai/claude-code/", claude),
+            ("/node_modules/@zed-industries/claude-code-acp/", claude),
+            ("/.claude/local/", claude),
+            ("/.local/share/claude/versions/", claude),
+            ("/node_modules/@openai/codex/", codex),
+            ("/node_modules/@zed-industries/codex-acp/", codex),
+            ("/node_modules/@google/gemini-cli/", agent("Gemini CLI")),
+            ("/cellar/gemini-cli/", agent("Gemini CLI")),
+            ("/node_modules/@qwen-code/", agent("Qwen Code")),
+            ("/.kimi-code/", agent("Kimi")),
+            ("/node_modules/opencode-ai/", agent("opencode")),
+            ("/node_modules/@charmland/crush/", agent("Crush")),
+            ("/node_modules/@sourcegraph/amp/", agent("Amp")),
+            ("/node_modules/@github/copilot/", agent("Copilot CLI")),
+            ("/node_modules/@kilocode/cli/", agent("Kilo Code")),
+            ("/node_modules/@augmentcode/auggie/", agent("Auggie")),
+            ("/node_modules/@continuedev/cli/", agent("Continue")),
+            ("/node_modules/cline/", agent("Cline")),
+            ("/node_modules/codebuff/", agent("Codebuff")),
+            ("/node_modules/@vibe-kit/grok-cli/", agent("Grok CLI")),
+            ("/node_modules/openclaw/", agent("OpenClaw")),
+            ("/.local/share/cursor-agent/", agent("Cursor Agent")),
+        ]
+    }()
+
+    /// `python -m <module>` agents (first module component).
+    private static let agentPythonModules: [String: LaunchOrigin] = [
+        "aider": LaunchOrigin(kind: .aiAgent, name: "Aider"),
+        "interpreter": LaunchOrigin(kind: .aiAgent, name: "Open Interpreter"),
+        "openhands": LaunchOrigin(kind: .aiAgent, name: "OpenHands"),
+        "openhands_cli": LaunchOrigin(kind: .aiAgent, name: "OpenHands"),
+        "kimi_cli": LaunchOrigin(kind: .aiAgent, name: "Kimi"),
+    ]
+
+    /// bun's own subcommands; any other bare word (`bun dev`) runs a package.json script.
+    private static let bunCommands: Set<String> = [
+        "test", "install", "i", "add", "a", "remove", "rm", "update", "outdated", "link", "unlink", "pm", "build",
+        "init", "create", "c", "upgrade", "repl", "publish", "patch", "patch-commit", "audit", "info", "why",
+        "completions", "help", "feedback",
+    ]
+
+    /// Package managers that launch package.json scripts (bin names and npm's process-title prefix).
+    static let packageManagerNames: Set<String> = ["npm", "npx", "pnpm", "pnpx", "yarn", "yarnpkg", "corepack"]
+
     private static let codexEnvironmentKeys = [
         "CODEX_SHELL", "CODEX_SANDBOX", "CODEX_SANDBOX_NETWORK_DISABLED", "CODEX_THREAD_ID", "CODEX_SESSION_ID",
         "CODEX_CI", "CODEX_INTERNAL_ORIGINATOR_OVERRIDE",
@@ -571,7 +707,8 @@ enum Classifier {
 
     private static let boundaryAppPrefixes: [String] = {
         var prefixes = terminalApps.map(\.0) + ideApps.map(\.0)
-        prefixes += ["claude", "codex", "chatgpt", "docker", "orbstack", "rancher desktop", "podman desktop", "finder"]
+        prefixes += ["claude", "codex", "chatgpt", "conductor", "docker", "orbstack", "rancher desktop", "podman desktop",
+                     "finder"]
         return prefixes
     }()
 
@@ -591,7 +728,7 @@ enum Classifier {
 
     private static let runnerExecutables: Set<String> = [
         "npm", "npx", "pnpm", "pnpx", "yarn", "yarnpkg", "bunx", "corepack", "nodemon", "concurrently", "turbo", "nx",
-        "tsx", "ts-node-dev", "tsnd", "make", "gmake", "just", "foreman", "overmind", "honcho", "hivemind", "air",
+        "tsx", "ts-node-dev", "tsnd", "make", "gmake", "gnumake", "bsdmake", "just", "foreman", "overmind", "honcho", "hivemind", "air",
         "entr", "watchexec", "cargo-watch", "mprocs", "task", "lerna", "mix",
     ]
 

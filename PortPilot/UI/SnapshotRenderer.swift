@@ -9,20 +9,40 @@ enum SnapshotRenderer {
     /// Renders `PanelView(store:snapshotMode: true)` at its natural height.
     /// - Parameters:
     ///   - showSettings: render the Settings page instead of the list.
+    ///   - showAbout: render the About page instead of the list (wins over `showSettings`).
     ///   - scale: pixels per point of the output (2 = Retina).
     /// - Returns: true when the PNG was written.
     @discardableResult
     static func render(store: AppStore, to url: URL, width: CGFloat = 440, colorScheme: ColorScheme,
-                       showSettings: Bool = false, scale: CGFloat = 2) -> Bool {
+                       showSettings: Bool = false, showAbout: Bool = false, scale: CGFloat = 2) -> Bool {
+        let root = PanelView(store: store, snapshotMode: true, initiallyShowingSettings: showSettings,
+                             initiallyShowingAbout: showAbout)
+            .frame(width: width)
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        return render(root, to: url, width: width, colorScheme: colorScheme, scale: scale)
+    }
+
+    /// Renders the welcome window's content (as it looks under the transparent title bar).
+    @discardableResult
+    static func renderWelcome(_ model: WelcomeModel, to url: URL, colorScheme: ColorScheme, scale: CGFloat = 2) -> Bool {
+        let root = WelcomeView(model: model)
+            .background(Theme.snapshotBackground)
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        return render(root, to: url, width: WelcomeView.width, colorScheme: colorScheme, scale: scale)
+    }
+
+    /// Draws any view offscreen at `width` and its natural height, in `colorScheme`, to a PNG.
+    @discardableResult
+    static func render<Content: View>(_ content: Content, to url: URL, width: CGFloat, colorScheme: ColorScheme,
+                                      scale: CGFloat = 2) -> Bool {
         _ = NSApplication.shared
 
         let appearance = NSAppearance(named: colorScheme == .dark ? .darkAqua : .aqua)
-        let root = PanelView(store: store, snapshotMode: true, initiallyShowingSettings: showSettings)
-            .frame(width: width)
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        let root = content
             .environment(\.colorScheme, colorScheme)
             // Draw controls as in the (key) menu bar panel rather than an inactive background window.
             .environment(\.controlActiveState, .key)
+            .environment(\.isSnapshotRendering, true)
             .transaction { $0.disablesAnimations = true }
 
         let hostingView = NSHostingView(rootView: root)
